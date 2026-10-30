@@ -9,13 +9,16 @@ export default function Dashboard() {
   const { version, bump } = useOutletContext()
   const [selected, setSelected] = useState(null)
   const { data, error, loading, reload } = useLoad(async () => {
-    const [overview, portal] = await Promise.all([Api.overview(), Api.adminOverview()])
-    return { overview, portal }
+    const [overview, portal, bookingActivity] = await Promise.all([
+      Api.overview(), Api.adminOverview(), Api.adminBookingActivity(100),
+    ])
+    return { overview, portal, bookingActivity }
   }, [version])
 
   if (loading && !data) return <Loading what="Loading dashboard" />
   if (error) return <ErrorBox error={error} />
-  const { overview: ov, portal } = data
+  const { overview: ov, portal, bookingActivity } = data
+  const disruptions = bookingActivity.events.filter((event) => ['disturbed', 'cancel', 'decline'].includes(event.action))
 
   return (
     <div className="stack">
@@ -42,6 +45,26 @@ export default function Dashboard() {
         <Stat label="Orders pending dispatch" value={portal.pending_dispatch} tone={portal.pending_dispatch ? 'warn' : 'good'}
               hint="Open orders with no electrician assigned" />
       </div>
+
+      <Card title={`Electrician releases (${disruptions.length})`} actions={<Link to="/jobs">Open jobs</Link>}>
+        {!disruptions.length ? <Empty>No electrician booking releases have been reported.</Empty> : <ul className="timeline-list">
+          {disruptions.map((event) => {
+            const outcome = event.needs_reassignment
+              ? 'Awaiting manual reassignment'
+              : event.current_electrician && event.current_electrician !== event.electrician
+                ? event.booking_stage === 'awaiting_response'
+                  ? `Replacement request sent to ${event.current_electrician}; awaiting response`
+                  : `Reassigned to ${event.current_electrician}`
+                : 'Reassignment in progress'
+            return <li key={event.id}>
+              <b>{event.job_number} · {event.title}</b>
+              <div>{event.electrician || 'Electrician'} {event.action === 'decline' ? 'declined the request' : event.action === 'cancel' ? 'cancelled the assignment' : 'reported a disruption'} · {outcome}</div>
+              {event.reason && <div className="small muted">Reason: {event.reason}</div>}
+              <button className="btn small" type="button" onClick={() => setSelected(event.job_id)}>View booking</button>
+            </li>
+          })}
+        </ul>}
+      </Card>
 
       <Card title="Electricians" actions={<Link to="/electricians?status=all">Manage all profiles</Link>}>
         <div className="row gap wrap admin-electrician-actions">

@@ -1,15 +1,18 @@
 """Role scoped booking, customer payments and electrician work actions."""
 from datetime import date, datetime, time, timedelta
+from threading import Lock
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, selectinload
 
 from app.database import get_db
 from app.models import (
     Assignment, AvailabilityOverride, BookingComplaint, BookingDecline, BookingDetails,
     BookingEvent, BookingFeedback,
-    BookingOwner, DutySession, Electrician, Job, ManualDispatchOverride, PaymentMethod, ServiceZone, User, UserProfile,
+    BookingOwner, BookingPaymentChoice, DutySession, Electrician, Job, ManualDispatchOverride, PaymentMethod,
+    ScheduleChange, ServiceZone, User, UserProfile,
 )
 from app.models.enums import JobStatus, RunMode
 from app.schemas import (
@@ -23,17 +26,88 @@ from app.services.electrician_service import get_electrician
 from app.services.errors import ApiError, not_found
 from app.services.job_service import get_job, transition
 from app.services.problem_builder import load_electricians
-from app.services.scheduling_service import execute_run, scheduler_lock
+from app.services.scheduling_service import current_snapshot, execute_run, scheduler_lock
 from app.services.serializers import electrician_dict, electrician_status, job_dict
+from app.services.razorpay_service import create_upi_qr, fetch_qr_payments
+from app.scheduling.locality import locality_key
 
 router = APIRouter(prefix="/api/portal", tags=["role portals"])
+_qr_creation_lock = Lock()
 
 # Electrician actions that release a booking back to dispatch; each one must carry a reason.
-RELEASE_ACTIONS = {"decline", "cancel", "customer_unavailable"}
+RELEASE_ACTIONS = {"decline", "cancel", "customer_unavailable", "disturbed"}
 # Booking events shown in the admin activity feed (electrician declines and all cancellations).
 ACTIVITY_ACTIONS = {"declined", "decline", "cancel", "customer_unavailable", "availability_cancelled_assignment",
-                    "cancelled_by_customer", "cancelled"}
+                    "cancelled_by_customer", "cancelled", "disturbed", "reassigned"}
 OPEN_STATUSES = (JobStatus.PENDING.value, JobStatus.UNASSIGNED.value)
+
+
+def _owned_customer_booking(db: Session, user: User, job_id: int) -> Job:
+    owner = db.get(BookingOwner, job_id)
+    if owner is None or owner.user_id != user.id:
+        raise not_found("Booking", job_id)
+    return get_job(db, job_id)
+
+
+@router.post("/customer/bookings/{job_id}/payment/qr")
+def customer_booking_payment_qr(job_id: int, db: Session = Depends(get_db),
+                                user: User = Depends(require_role("customer"))):
+    """Create or return the booking's fixed-amount Razorpay UPI QR code."""
+    job = _owned_customer_booking(db, user, job_id)
+    choice = db.get(BookingPaymentChoice, job_id)
+    if choice is None or choice.method != "razorpay_qr":
+        raise ApiError(409, "QR_PAYMENT_NOT_SELECTED", "This booking was not set up for Razorpay QR payment.")
+    if job.booking_details is None:
+        raise ApiError(409, "BOOKING_AMOUNT_MISSING", "This booking has no payment amount.")
+    if job.booking_details.payment_status == "paid":
+        return {"job_id": job_id, "payment_method": choice.method,
+                "payment_status": "paid", "qr_code_id": choice.razorpay_qr_id,
+                "image_url": choice.razorpay_qr_image_url, "close_by": choice.razorpay_qr_close_by}
+
+    with _qr_creation_lock:
+        # Another request in this process may have created the QR while this one waited.
+        db.refresh(choice)
+        now_epoch = int(datetime.now().timestamp())
+        if (choice.razorpay_qr_id and choice.razorpay_qr_image_url
+                and choice.razorpay_qr_close_by and choice.razorpay_qr_close_by > now_epoch):
+            qr = {"id": choice.razorpay_qr_id, "image_url": choice.razorpay_qr_image_url,
+                  "close_by": choice.razorpay_qr_close_by}
+        else:
+            qr = create_upi_qr(amount_rupees=job.booking_details.amount,
+                               job_number=job.job_number or f"JOB-{job.id:05d}", job_id=job.id)
+            choice.razorpay_qr_id = qr["id"]
+            choice.razorpay_qr_image_url = qr["image_url"]
+            choice.razorpay_qr_close_by = qr.get("close_by")
+            db.commit()
+    return {"job_id": job_id, "payment_method": choice.method,
+            "payment_status": job.booking_details.payment_status,
+            "qr_code_id": choice.razorpay_qr_id, "image_url": choice.razorpay_qr_image_url,
+            "close_by": choice.razorpay_qr_close_by}
+
+
+@router.get("/customer/bookings/{job_id}/payment/status")
+def customer_booking_payment_status(job_id: int, db: Session = Depends(get_db),
+                                    user: User = Depends(require_role("customer"))):
+    """Reconcile this booking's QR payment against Razorpay's payment records."""
+    job = _owned_customer_booking(db, user, job_id)
+    choice = db.get(BookingPaymentChoice, job_id)
+    if choice is None or choice.method != "razorpay_qr":
+        raise ApiError(409, "QR_PAYMENT_NOT_SELECTED", "This booking was not set up for Razorpay QR payment.")
+    details = job.booking_details
+    if details is None:
+        raise ApiError(409, "BOOKING_AMOUNT_MISSING", "This booking has no payment amount.")
+    if details.payment_status != "paid" and choice.razorpay_qr_id:
+        expected_paise = int(round(details.amount * 100))
+        for payment in fetch_qr_payments(choice.razorpay_qr_id):
+            if (payment.get("status") == "captured" and payment.get("currency") == "INR"
+                    and payment.get("amount") == expected_paise):
+                details.payment_status = "paid"
+                choice.razorpay_payment_id = payment.get("id")
+                db.commit()
+                break
+    return {"job_id": job_id, "payment_method": choice.method,
+            "payment_status": details.payment_status,
+            "qr_code_id": choice.razorpay_qr_id}
 
 
 def _profile(db: Session, user: User) -> UserProfile:
@@ -58,22 +132,25 @@ def _clear_manual_override(db: Session, job_id: int, electrician_id: int | None 
 
 
 def _localities(electrician: Electrician) -> set[str]:
-    return {x.locality.strip().casefold() for x in electrician.service_localities}
+    return {locality_key(x.locality) for x in electrician.service_localities if locality_key(x.locality)}
 
 
 def _eligible_local_offer(db: Session, job: Job, electrician: Electrician) -> bool:
+    is_customer_booking = db.scalar(select(BookingOwner.job_id).where(BookingOwner.job_id == job.id)) is not None
     manual = db.get(ManualDispatchOverride, job.id)
     if manual and manual.active and manual.electrician_id != electrician.id:
         return False
     if db.scalar(select(BookingDecline.id).where(
         BookingDecline.job_id == job.id, BookingDecline.electrician_id == electrician.id)):
         return False
-    if not electrician.active or not {s.code for s in job.required_skills}.issubset({s.code for s in electrician.skills}):
+    if not electrician.active:
         return False
-    if not any(z.id == job.zone_id for z in electrician.zones):
+    if not is_customer_booking and not {s.code for s in job.required_skills}.issubset({s.code for s in electrician.skills}):
+        return False
+    if not is_customer_booking and not any(z.id == job.zone_id for z in electrician.zones):
         return False
     if job.booking_details and job.booking_details.locality and \
-            job.booking_details.locality.strip().casefold() not in _localities(electrician):
+            not serves_locality(electrician, job.booking_details.locality):
         return False
     override = db.get(AvailabilityOverride, electrician.id)
     if override and not override.is_available:
@@ -110,14 +187,17 @@ def _manual_assign(db: Session, job: Job, electrician: Electrician, reason: str,
         raise ApiError(409, "ELECTRICIAN_INACTIVE", "This electrician is inactive.")
     required = {s.code for s in job.required_skills}
     skills = {s.code for s in electrician.skills}
-    if not required.issubset(skills):
-        raise ApiError(409, "SKILL_MISMATCH", "The electrician does not have every skill required by this booking.")
-    if not any(z.id == job.zone_id for z in electrician.zones):
+    is_customer_booking = db.scalar(select(BookingOwner.job_id).where(BookingOwner.job_id == job.id)) is not None
+    if not is_customer_booking and not required.issubset(skills):
+        raise ApiError(409, "SKILL_MISMATCH", "The electrician does not have every skill required by this job.")
+    if not is_customer_booking and not any(z.id == job.zone_id for z in electrician.zones):
         raise ApiError(409, "ZONE_MISMATCH", "The electrician is not assigned to this service zone.")
-    if require_locality and job.booking_details and job.booking_details.locality:
-        locality = job.booking_details.locality.strip().casefold()
-        if locality not in _localities(electrician):
-            raise ApiError(409, "LOCALITY_MISMATCH", f"This electrician does not serve {job.booking_details.locality}.")
+    if require_locality:
+        locality = job.booking_details.locality.strip() if job.booking_details and job.booking_details.locality else ""
+        if not locality:
+            raise ApiError(409, "LOCALITY_REQUIRED", "Resolve the customer service locality before assigning an electrician.")
+        if not serves_locality(electrician, locality):
+            raise ApiError(409, "LOCALITY_MISMATCH", f"This electrician does not serve {locality}.")
     override = db.get(AvailabilityOverride, electrician.id)
     if override and not override.is_available:
         raise ApiError(409, "ELECTRICIAN_UNAVAILABLE", "The electrician is marked unavailable.")
@@ -186,6 +266,191 @@ def _dispatch_again(db: Session, trigger: str) -> None:
         execute_run(db, trigger=trigger, mode=RunMode.INCREMENTAL)
 
 
+def _record_booking_decline(db: Session, job_id: int, electrician_id: int, reason: str) -> None:
+    existing = db.scalar(select(BookingDecline).where(
+        BookingDecline.job_id == job_id, BookingDecline.electrician_id == electrician_id))
+    if existing is None:
+        db.add(BookingDecline(job_id=job_id, electrician_id=electrician_id, reason=reason))
+    else:
+        existing.reason = reason
+
+
+def _force_locality_reassignment(db: Session, job: Job, *, old_id: int, locality: str,
+                                 run_id: str | None) -> bool:
+    """Keep a customer request moving when route constraints reject every local candidate.
+
+    For customer bookings the electrician receives a pending offer and can accept or decline it;
+    route diagnostics such as travel time, shift, overlap, skill and legacy zone do not block sending
+    that same-locality offer.
+    """
+    declined_ids = set(db.scalars(select(BookingDecline.electrician_id).where(
+        BookingDecline.job_id == job.id)))
+    excluded_ids = declined_ids | {old_id}
+    candidates = [electrician for electrician in load_electricians(db, active_only=True)
+                  if electrician.id not in excluded_ids and serves_locality(electrician, locality)]
+    if not candidates:
+        return False
+
+    preferred_ids = set()
+    for entry in job.unassigned_reasons or []:
+        details = entry.get("details") or {}
+        preferred_ids.update(details.get("electricians", []))
+    candidate = min(candidates, key=lambda electrician: (electrician.id not in preferred_ids, electrician.id))
+
+    start = job.window_start
+    end = start + timedelta(minutes=job.duration_minutes)
+    previous = next((assignment for assignment in reversed(job.assignments)
+                     if assignment.electrician_id == old_id), None)
+    message = f"Automatically reassigned to {candidate.name} in {locality}; awaiting electrician response."
+    db.add(Assignment(
+        job_id=job.id, electrician_id=candidate.id, run_id=run_id, start=start, end=end,
+        travel_minutes=0, travel_from=f"Customer locality: {locality}",
+        explanation="Locality fallback offer; waiting for the electrician to accept or decline.",
+        is_active=True,
+    ))
+    job.status = JobStatus.ASSIGNED.value
+    job.feasibility = None
+    job.unassigned_reasons = None
+
+    override = db.get(ManualDispatchOverride, job.id)
+    if override is None:
+        db.add(ManualDispatchOverride(job_id=job.id, electrician_id=candidate.id,
+                                      reason="Automatic same-locality reassignment; awaiting response.", active=True))
+    else:
+        override.electrician_id = candidate.id
+        override.reason = "Automatic same-locality reassignment; awaiting response."
+        override.active = True
+
+    db.add(BookingEvent(job_id=job.id, actor_role="system", action="reassigned",
+                        from_status=JobStatus.UNASSIGNED.value, to_status=JobStatus.ASSIGNED.value,
+                        old_electrician_id=old_id, new_electrician_id=candidate.id, reason=message))
+    if run_id:
+        db.add(ScheduleChange(
+            run_id=run_id, job_id=job.id, change_type="reassigned",
+            old_electrician_id=old_id, new_electrician_id=candidate.id,
+            old_start=previous.start if previous else None, old_end=previous.end if previous else None,
+            new_start=start, new_end=end, reason=message,
+        ))
+    db.commit()
+    db.expire(job, ["assignments", "booking_events"])
+    return True
+
+
+def _release_customer_booking(db: Session, job_id: int, electrician: Electrician,
+                              user: User, reason: str, action: str) -> dict:
+    """Release an accepted customer booking and recover it through the normal scheduler."""
+    with scheduler_lock():
+        job = get_job(db, job_id)
+        if db.scalar(select(BookingOwner.job_id).where(BookingOwner.job_id == job.id)) is None:
+            raise ApiError(409, "CUSTOMER_BOOKING_REQUIRED", "Automatic same-locality recovery is available only for customer bookings.")
+
+        active = job.active_assignment
+        if active is None or active.electrician_id != electrician.id:
+            raise ApiError(403, "NOT_ASSIGNED", "You can only release a booking assigned to your electrician profile.")
+        stage = job_dict(job)["booking_stage"]
+        expected_stage = "awaiting_response" if action == "decline" else "accepted"
+        if job.status != JobStatus.ASSIGNED.value or stage != expected_stage:
+            message = ("Only a pending request can be declined." if action == "decline"
+                       else "Only an accepted booking that has not started can be released for reassignment.")
+            raise ApiError(409, "BOOKING_NOT_ACCEPTED", message)
+
+        old_id = active.electrician_id
+        details = job.booking_details
+        locality = (details.locality or "").strip() if details else ""
+        _record_booking_decline(db, job.id, old_id, reason)
+        _clear_manual_override(db, job.id)
+
+        if not locality:
+            # Without a locality the scheduler cannot safely enforce a same-locality recovery.
+            active.is_active = False
+            job.status = JobStatus.UNASSIGNED.value
+            job.feasibility = "unassignable"
+            job.unassigned_reasons = [{
+                "code": "LOCALITY_REQUIRED",
+                "message": "The booking has no service locality, so dispatch must choose a replacement manually.",
+            }]
+            _event(db, job, user, action, before=JobStatus.ASSIGNED.value,
+                   after=JobStatus.UNASSIGNED.value, old_id=old_id, reason=reason)
+            db.commit()
+            db.expire(job, ["booking_events", "assignments"])
+            return job_dict(get_job(db, job.id))
+
+        before_snapshot = current_snapshot(db)
+        active.is_active = False
+        job.status = JobStatus.UNASSIGNED.value
+        job.feasibility = None
+        job.unassigned_reasons = None
+        disturbance_event = BookingEvent(
+            job_id=job.id, actor_user_id=user.id, actor_role=active_role(user), action=action,
+            from_status=JobStatus.ASSIGNED.value, to_status=JobStatus.UNASSIGNED.value,
+            old_electrician_id=old_id, reason=reason,
+        )
+        job.booking_events.append(disturbance_event)
+        db.flush()
+
+        run = None
+        try:
+            run = execute_run(
+                db, trigger=f"electrician_{action}", mode=RunMode.INCREMENTAL,
+                disruption={"type": f"electrician_{action}", "job_id": job.id,
+                            "job_number": job.job_number, "electrician_id": old_id,
+                            "reason": reason, "locality": locality,
+                            "district": details.district, "state": details.state},
+                before_snapshot=before_snapshot,
+            )
+        except ApiError as exc:
+            db.rollback()
+            if exc.code == "SCHEDULER_BUSY":
+                raise
+
+            job = get_job(db, job_id)
+            active = job.active_assignment
+            # execute_run rolls its transaction back on failure, which restores the
+            # old active assignment. Reapply the release before making the locality
+            # fallback so a failed scheduler run cannot leave the booking with the
+            # electrician who just declined or reported a disruption.
+            if active is not None and active.electrician_id == old_id:
+                active.is_active = False
+            job.status = JobStatus.UNASSIGNED.value
+            job.feasibility = "currently_infeasible"
+            job.unassigned_reasons = [{
+                "code": "SCHEDULER_RECOVERY_FAILED",
+                "message": "The scheduling engine could not complete recovery; trying a same-locality offer.",
+            }]
+            _record_booking_decline(db, job.id, old_id, reason)
+            _clear_manual_override(db, job.id)
+            db.add(BookingEvent(
+                job_id=job.id, actor_user_id=user.id, actor_role=active_role(user), action=action,
+                from_status=JobStatus.ASSIGNED.value, to_status=JobStatus.UNASSIGNED.value,
+                old_electrician_id=old_id, reason=reason,
+            ))
+            db.flush()
+            failed_run_id = (exc.details or {}).get("run_id")
+            if _force_locality_reassignment(db, job, old_id=old_id, locality=locality,
+                                            run_id=failed_run_id):
+                return job_dict(get_job(db, job_id))
+            job.unassigned_reasons = [{
+                "code": "LOCALITY_REASSIGNMENT_PENDING",
+                "message": f"No other active electrician is registered for {locality}; the booking remains open.",
+            }]
+            db.add(BookingEvent(job_id=job.id, actor_role="system", action="unassigned",
+                                from_status=JobStatus.ASSIGNED.value, to_status=JobStatus.UNASSIGNED.value,
+                                old_electrician_id=old_id,
+                                reason="Automatic recovery failed; awaiting manual reassignment."))
+            db.commit()
+            job = get_job(db, job_id)
+            db.expire(job, ["booking_events", "assignments"])
+            return job_dict(job)
+
+        job = get_job(db, job_id)
+        if job.status == JobStatus.UNASSIGNED.value and job.active_assignment is None:
+            if _force_locality_reassignment(db, job, old_id=old_id, locality=locality,
+                                            run_id=run.id if run else None):
+                return job_dict(get_job(db, job_id))
+        db.expire(job, ["booking_events", "assignments"])
+        return job_dict(job)
+
+
 @router.get("/customer/electricians")
 def customer_electricians(
     window_start: datetime = Query(),
@@ -221,9 +486,11 @@ def customer_electricians(
 def customer_localities(zone_code: str = Query(min_length=1, max_length=20),
                         db: Session = Depends(get_db),
                         user: User = Depends(require_role("customer"))):
-    """Locality suggestions from active electricians' registered service areas."""
+    """Locality suggestions from active electricians' registered service areas.
+
+    `zone_code` remains accepted for existing clients; customer service coverage is locality-based.
+    """
     return sorted({area.locality for electrician in load_electricians(db, active_only=True)
-                   if any(zone.code == zone_code for zone in electrician.zones)
                    for area in electrician.service_localities}, key=str.casefold)
 
 
@@ -433,13 +700,41 @@ def electrician_booking_action(job_id: int, data: BookingActionIn, db: Session =
     else:
         profile = _profile(db, user)
         electrician = get_electrician(db, profile.electrician_id)
-    job = get_job(db, job_id)
     action = data.action
-    before = job.status
-    active = job.active_assignment
     reason = data.reason.strip() if data.reason else None
     if action in RELEASE_ACTIONS and not reason:
-        raise ApiError(422, "REASON_REQUIRED", "Add a short reason before declining or cancelling this booking.")
+        raise ApiError(422, "REASON_REQUIRED", "Add a short reason before releasing this booking.")
+    if action == "disturbed":
+        try:
+            return _release_customer_booking(db, job_id, electrician, user, reason, action)
+        except OperationalError as exc:
+            db.rollback()
+            raise ApiError(409, "BOOKING_UPDATE_BUSY",
+                           "This booking changed during the disruption update. Refresh and try again.") from exc
+    if action == "decline":
+        assigned_job = get_job(db, job_id)
+        is_customer_booking = db.scalar(
+            select(BookingOwner.job_id).where(BookingOwner.job_id == job_id)) is not None
+        if is_customer_booking and assigned_job.active_assignment is not None:
+            try:
+                return _release_customer_booking(db, job_id, electrician, user, reason, action)
+            except OperationalError as exc:
+                db.rollback()
+                raise ApiError(409, "BOOKING_UPDATE_BUSY",
+                               "This booking changed while the decline was being processed. Refresh and try again.") from exc
+    if action == "cancel":
+        customer_booking = db.scalar(select(BookingOwner.job_id).where(BookingOwner.job_id == job_id)) is not None
+        if customer_booking:
+            try:
+                return _release_customer_booking(db, job_id, electrician, user, reason, action)
+            except OperationalError as exc:
+                db.rollback()
+                raise ApiError(409, "BOOKING_UPDATE_BUSY",
+                               "This booking changed during cancellation. Refresh and try again.") from exc
+
+    job = get_job(db, job_id)
+    before = job.status
+    active = job.active_assignment
     if action == "accept":
         if job.status not in (JobStatus.ASSIGNED.value, JobStatus.PENDING.value, JobStatus.UNASSIGNED.value):
             raise ApiError(409, "BOOKING_NOT_AVAILABLE", "This booking is no longer awaiting an electrician response.")
@@ -472,7 +767,10 @@ def electrician_booking_action(job_id: int, data: BookingActionIn, db: Session =
     elif action == "complete":
         if job.status != JobStatus.IN_PROGRESS.value:
             raise ApiError(409, "INVALID_STATUS", "Start the booking before marking it complete.")
-        transition(db, job, JobStatus.COMPLETED.value)
+        completed_at = datetime.now().replace(second=0, microsecond=0)
+        if job.actual_start and completed_at <= job.actual_start:
+            completed_at = job.actual_start + timedelta(minutes=1)
+        transition(db, job, JobStatus.COMPLETED.value, at=completed_at)
         _event(db, job, user, "completed", before=before, after=job.status)
         if job.booking_details:
             job.booking_details.payment_status = job.booking_details.payment_status or "pending"
@@ -658,7 +956,7 @@ def admin_overview(locality: str | None = None, start: date | None = None, end: 
 @router.get("/admin/booking-activity")
 def admin_booking_activity(limit: int = Query(default=50, ge=1, le=200),
                            db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
-    """Recent electrician declines and booking cancellations, with whether the booking still needs an electrician."""
+    """Recent electrician disruptions, declines and cancellations with current reassignment state."""
     events = list(db.scalars(select(BookingEvent).where(BookingEvent.action.in_(ACTIVITY_ACTIONS))
                              .order_by(BookingEvent.created_at.desc(), BookingEvent.id.desc()).limit(limit)))
     job_ids = {ev.job_id for ev in events}
@@ -666,17 +964,25 @@ def admin_booking_activity(limit: int = Query(default=50, ge=1, le=200),
         selectinload(Job.assignments).selectinload(Assignment.electrician)))} if job_ids else {}
     users = {u.id: u.username for u in db.scalars(select(User))}
     names = {e.id: e.name for e in db.scalars(select(Electrician))}
+    serialized_jobs = {job.id: job_dict(job) for job in jobs.values()}
     items = []
     for ev in events:
         job = jobs[ev.job_id]
         current = job.active_assignment
+        needs_reassignment = job.status in OPEN_STATUSES and current is None
+        stage = serialized_jobs[job.id]["booking_stage"]
         items.append({
             "id": ev.id, "job_id": job.id, "job_number": job.job_number, "title": job.title,
             "action": ev.action, "actor_role": ev.actor_role, "actor": users.get(ev.actor_user_id),
             "electrician_id": ev.old_electrician_id, "electrician": names.get(ev.old_electrician_id),
+            "new_electrician": names.get(ev.new_electrician_id),
             "reason": ev.reason, "created_at": ev.created_at,
             "job_status": job.status,
-            "needs_reassignment": job.status in OPEN_STATUSES and current is None,
+            "booking_stage": stage,
+            "needs_reassignment": needs_reassignment,
+            "reassignment_status": ("awaiting_manual_reassignment" if needs_reassignment
+                                     else "awaiting_electrician_response" if stage == "awaiting_response"
+                                     else "reassigned" if ev.action == "reassigned" else "active"),
             "current_electrician": current.electrician.name if current and current.electrician else None,
         })
     return {"events": items, "needs_reassignment": len({x["job_id"] for x in items if x["needs_reassignment"]})}
@@ -770,7 +1076,8 @@ def admin_assign(job_id: int, data: ManualAssignmentIn, db: Session = Depends(ge
                                      selectinload(Electrician.service_localities)))
     if electrician is None:
         raise not_found("Electrician", data.electrician_id)
-    _manual_assign(db, job, electrician, data.reason, require_locality=False, user=user)
+    is_customer_booking = db.scalar(select(BookingOwner.job_id).where(BookingOwner.job_id == job.id)) is not None
+    _manual_assign(db, job, electrician, data.reason, require_locality=is_customer_booking, user=user)
     db.commit()
     return job_dict(get_job(db, job_id))
 
@@ -793,12 +1100,20 @@ def update_payment_status(job_id: int, data: PaymentStatusIn, db: Session = Depe
 @router.get("/admin/dispatch-candidates/{job_id}")
 def dispatch_candidates(job_id: int, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     job = get_job(db, job_id)
+    is_customer_booking = db.scalar(select(BookingOwner.job_id).where(BookingOwner.job_id == job.id)) is not None
+    customer_locality = job.booking_details.locality.strip() if job.booking_details and job.booking_details.locality else ""
     candidates = []
     for e in load_electricians(db, active_only=True):
-        if {s.code for s in job.required_skills}.issubset({s.code for s in e.skills}) \
-                and any(z.id == job.zone_id for z in e.zones):
+        matches_skills = (is_customer_booking or
+                          {s.code for s in job.required_skills}.issubset({s.code for s in e.skills}))
+        covers_zone = is_customer_booking or any(z.id == job.zone_id for z in e.zones)
+        if matches_skills and covers_zone:
+            serves_customer_locality = (serves_locality(e, customer_locality)
+                                        if is_customer_booking else not customer_locality
+                                        or serves_locality(e, customer_locality))
+            if is_customer_booking and not serves_customer_locality:
+                continue
             item = electrician_dict(e)
-            item["serves_locality"] = not job.booking_details or not job.booking_details.locality \
-                or job.booking_details.locality.strip().casefold() in _localities(e)
+            item["serves_locality"] = serves_customer_locality
             candidates.append(item)
     return candidates

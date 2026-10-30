@@ -702,6 +702,20 @@ export default function ServiceCart() {
       toast('Enter your service locality and full address', 'error')
       return
     }
+    if (user?.role === 'customer') {
+      const rawPhone = customerPhone.trim()
+      const digits = rawPhone.replace(/\D/g, '')
+      const internationalDigits = rawPhone.startsWith('00') ? digits.slice(2) : digits
+      const hasInternationalPrefix = rawPhone.startsWith('+') || rawPhone.startsWith('00')
+      const validPhone = hasInternationalPrefix
+        ? internationalDigits.length >= 8 && internationalDigits.length <= 15
+        : digits.length === 10 || (digits.length === 11 && digits.startsWith('0')) ||
+          (digits.length === 12 && digits.startsWith('91'))
+      if (!validPhone) {
+        toast('Enter a valid mobile number to receive your booking confirmation by SMS', 'error')
+        return
+      }
+    }
     if (!location?.district || !location?.state) {
       toast('Select your district and state in the location selector', 'error')
       return

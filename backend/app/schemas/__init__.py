@@ -1,5 +1,6 @@
 """Request validation models. Responses are plain dicts built in services/serializers.py."""
 from datetime import datetime, time
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -44,6 +45,7 @@ class JobCreate(NaiveTimes):
     state: str | None = Field(default=None, max_length=120)
     service_category: str | None = Field(default=None, max_length=80)
     booking_amount: float = Field(default=0, ge=0, le=1000000)
+    payment_method: Literal["razorpay_qr", "cash_on_service"] = "cash_on_service"
     service_items: list[ServiceItemIn] = Field(default_factory=list, max_length=20)
     coupon_code: str | None = Field(default=None, max_length=30)
     lat: float = Field(ge=-90, le=90)
@@ -223,7 +225,7 @@ class PaymentMethodIn(BaseModel):
 
 class BookingActionIn(BaseModel):
     model_config = _STRICT
-    action: str = Field(pattern=r"^(accept|decline|start|complete|cancel|customer_unavailable)$")
+    action: str = Field(pattern=r"^(accept|decline|start|complete|cancel|customer_unavailable|disturbed)$")
     reason: str | None = Field(default=None, max_length=250)
     electrician_id: int | None = Field(default=None, gt=0)
 

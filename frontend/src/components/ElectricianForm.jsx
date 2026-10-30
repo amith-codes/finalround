@@ -25,7 +25,6 @@ export default function ElectricianForm({ electrician, skills, zones, onSubmit }
   const [busy, setBusy] = useState(false)
   const set = (k) => (ev) => setF({ ...f, [k]: ev.target.value })
   const setShift = (d, patch) => setShifts(shifts.map((s, i) => (i === d ? { ...s, ...patch } : s)))
-
   const submit = async (ev) => {
     ev.preventDefault()
     setBusy(true)

@@ -165,6 +165,9 @@ class Job(Base):
     booking_details: Mapped["BookingDetails | None"] = relationship(
         back_populates="job", cascade="all, delete-orphan", uselist=False
     )
+    payment_choice: Mapped["BookingPaymentChoice | None"] = relationship(
+        back_populates="job", cascade="all, delete-orphan", uselist=False
+    )
     booking_events: Mapped[list["BookingEvent"]] = relationship(back_populates="job", order_by="BookingEvent.id")
 
     __table_args__ = (
@@ -315,6 +318,22 @@ class BookingDetails(Base):
     job: Mapped[Job] = relationship(back_populates="booking_details")
 
 
+class BookingPaymentChoice(Base):
+    """Payment selection and Razorpay QR reference for a customer booking."""
+
+    __tablename__ = "booking_payment_choices"
+
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True)
+    method: Mapped[str] = mapped_column(String(30), default="cash_on_service")
+    razorpay_qr_id: Mapped[str | None] = mapped_column(String(80), unique=True)
+    razorpay_qr_image_url: Mapped[str | None] = mapped_column(Text)
+    razorpay_qr_close_by: Mapped[int | None] = mapped_column(Integer)
+    razorpay_payment_id: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    job: Mapped[Job] = relationship(back_populates="payment_choice")
+
+
 class ElectricianLocality(Base):
     __tablename__ = "electrician_localities"
 
@@ -429,6 +448,7 @@ __all__ = [
     "BookingDecline",
     "BookingEvent",
     "BookingOwner",
+    "BookingPaymentChoice",
     "DutySession",
     "Electrician",
     "ElectricianLocality",

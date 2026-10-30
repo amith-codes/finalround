@@ -12,6 +12,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from app.scheduling.routes import fmt, minutes
+from app.scheduling.locality import locality_key
 from app.scheduling.travel import haversine_km
 
 if TYPE_CHECKING:
@@ -54,8 +55,8 @@ def diagnose(s: "Scheduler", sol: "Solution", jid: int) -> tuple[str, list[dict]
         )]
 
     techs = s.p.techs
-    skilled = [t for t in techs if job.skills <= t.skills]
-    if not skilled:
+    skilled = [t for t in techs if not job.skills_required or job.skills <= t.skills]
+    if job.skills_required and not skilled:
         best = max(techs, key=lambda t: (len(job.skills & t.skills), -t.id), default=None)
         missing = sorted(job.skills - best.skills) if best else sorted(job.skills)
         held = set().union(*(t.skills for t in techs)) if techs else set()
@@ -71,8 +72,8 @@ def diagnose(s: "Scheduler", sol: "Solution", jid: int) -> tuple[str, list[dict]
             missing_skills=nobody or missing,
         )]
 
-    zoned = [t for t in skilled if job.zone in t.zones]
-    if not zoned:
+    covered = [t for t in skilled if not job.zone_required or job.zone in t.zones]
+    if job.zone_required and not covered:
         nearest = min(skilled, key=lambda t: (haversine_km(t.home_lat, t.home_lon, job.lat, job.lon), t.id))
         return "unassignable", [_reason(
             "NO_ZONE_ELIGIBLE",
@@ -82,13 +83,15 @@ def diagnose(s: "Scheduler", sol: "Solution", jid: int) -> tuple[str, list[dict]
         )]
 
     if job.locality and job.manual_tech_id is None and not any(
-        job.locality.strip().casefold() in {value.strip().casefold() for value in t.localities}
-        for t in zoned
+        locality_key(job.locality) in {locality_key(value) for value in t.localities}
+        for t in covered
     ):
         return "unassignable", [_reason(
             "LOCALITY_COVERAGE",
-            f"No qualified electrician is registered to serve {job.locality} in zone {job.zone}.",
-            "Add this locality to a qualified electrician or assign the booking manually.",
+            (f"No electrician is registered to serve {job.locality} in zone {job.zone}."
+             if job.zone_required else f"No electrician is registered to serve {job.locality}."),
+            ("Add this locality to an eligible electrician or assign the job manually."
+             if job.zone_required else "Register an electrician for this service locality."),
             locality=job.locality,
         )]
 
@@ -96,7 +99,7 @@ def diagnose(s: "Scheduler", sol: "Solution", jid: int) -> tuple[str, list[dict]
     if not keys:
         return "unassignable", [_reason(
             "SHIFT_CONSTRAINTS",
-            f"None of the {len(zoned)} eligible electricians has a shift overlapping the window "
+            f"None of the {len(covered)} eligible electricians has a shift overlapping the window "
             f"{fmt(job.window_start)}-{job.window_end:%H:%M}.",
             "Move the time window into working hours or add a shift.",
         )]
@@ -125,10 +128,12 @@ def diagnose(s: "Scheduler", sol: "Solution", jid: int) -> tuple[str, list[dict]
         blocker_labels = [s.label(b) for b in sorted(blockers, key=s.order_key)[:5]]
         return "currently_infeasible", [_reason(
             "NO_FEASIBLE_SLOT",
-            f"All {len(zoned)} eligible electrician(s) are fully booked during the window "
+            f"All {len(covered)} eligible electrician(s) are fully booked during the window "
             f"{fmt(job.window_start)}-{job.window_end:%H:%M}"
             + (f" (occupied by {', '.join(blocker_labels)})." if blocker_labels else "."),
-            "Widen the time window, allow overtime, raise the priority, or add capacity in this zone.",
+            ("Widen the time window, allow overtime, raise the priority, or add capacity in this zone."
+             if job.zone_required else
+             "Widen the time window, allow overtime, or make another electrician available in this locality."),
             blocking_jobs=sorted(blockers),
         )]
 
@@ -136,7 +141,12 @@ def diagnose(s: "Scheduler", sol: "Solution", jid: int) -> tuple[str, list[dict]
     for code in PRECEDENCE:
         if code in found:
             f = found[code]
-            reasons.append(_reason(code, _MESSAGES[code](f["count"], f["example"]), _SUGGESTIONS[code],
+            suggestion = _SUGGESTIONS[code]
+            if not job.zone_required and code == "ELECTRICIAN_UNAVAILABLE":
+                suggestion = "Reschedule or make an electrician serving this locality available."
+            elif not job.zone_required and code == "TRAVEL_TIME":
+                suggestion = "Widen the window or choose an electrician based closer to this locality."
+            reasons.append(_reason(code, _MESSAGES[code](f["count"], f["example"]), suggestion,
                                    electricians=f["techs"]))
     return "unassignable", reasons
 

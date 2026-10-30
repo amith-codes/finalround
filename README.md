@@ -66,7 +66,38 @@ The configured `dispatcher` admin account is also provisioned for the customer a
 - The electrician workspace lists direct customer requests separately from local dispatch offers. Electricians can accept or decline requests from their dashboard. A decline requires a non-empty reason (`422 REASON_REQUIRED`); the reason is stored as a booking event and shown on the customer's booking. Cancelling an assignment or reporting the customer unavailable also requires a reason. Customer phone numbers are hidden on offers until the electrician accepts.
 - Every booking response carries `booking_stage` (`awaiting_dispatch`, `awaiting_response`, `accepted`, `reassignment_needed`, `in_progress`, `completed`, `cancelled`), derived from the job status and its latest booking event. The customer view shows the scheduled arrival from the dispatch plan; there is no live location tracking.
 - The admin dashboard (`GET /api/portal/admin/overview`) reports orders received today, registered electricians (active and inactive), electricians available now (active, on shift, not on a job, no unavailable period or availability switch-off) and orders pending dispatch (open orders with no active assignment). `GET /api/portal/admin/booking-activity` lists electrician declines and booking cancellations with the reason and whether the booking still needs reassignment.
-- Payment methods save only a label, brand and last four digits. Card charging is not connected in this application; payment status can be updated by an admin.
+- Saved payment-method profiles store only a label, brand and last four digits. Customer checkout also supports Razorpay UPI QR and cash on service; see the Razorpay setup below. Admins can still update payment status when needed.
+
+### Booking confirmation SMS (Twilio)
+
+After a customer booking is saved, DispatchGrid sends a confirmation SMS to the mobile number entered in the booking form. The message confirms receipt and notes that the selected electrician still needs to respond. SMS delivery is best-effort: a Twilio outage does not undo a booking. Customer bookings require a valid mobile number; a 10-digit number is treated as an Indian number and sent with the `+91` prefix. International numbers can be entered in E.164 format, such as `+14155550123`.
+
+Configure Twilio credentials in the environment before starting the backend. Use either a Twilio SMS-capable phone number or a Messaging Service SID:
+
+```powershell
+$env:DISPATCHGRID_TWILIO_ACCOUNT_SID = "AC..."
+$env:DISPATCHGRID_TWILIO_AUTH_TOKEN = "..."
+$env:DISPATCHGRID_TWILIO_FROM_NUMBER = "+1..."
+# Or use this instead of DISPATCHGRID_TWILIO_FROM_NUMBER:
+# $env:DISPATCHGRID_TWILIO_MESSAGING_SERVICE_SID = "MG..."
+uvicorn app.main:app --reload
+```
+
+Keep the Auth Token private and set it only in the backend environment. Without the account SID, token, and sender configuration, bookings still work but no SMS is sent.
+
+### Customer checkout payments (Razorpay)
+
+Customer checkout offers a single-use Razorpay UPI QR for the booking total or **Cash on service**. The backend creates a fixed-amount QR after the booking is saved. After scanning, the customer can use **I've paid · Check status** to verify the captured amount against Razorpay; the payment remains pending until Razorpay confirms it. A QR expires after two hours and can be regenerated from the booking confirmation.
+
+Create API keys in Razorpay Test Mode and set them in the backend environment before starting Uvicorn. Razorpay lists UPI QR creation as an account feature that may need to be enabled:
+
+```powershell
+$env:DISPATCHGRID_RAZORPAY_KEY_ID = "rzp_test_..."
+$env:DISPATCHGRID_RAZORPAY_KEY_SECRET = "..."
+uvicorn app.main:app --reload
+```
+
+Keep the key secret on the backend and out of source control. Use Live Mode keys only after Razorpay has activated the merchant account. Without these settings, bookings still save, and the confirmation dialog explains that QR generation needs configuration and offers a retry.
 
 Role grant tables are created automatically on startup. Existing SQLite records are preserved; `python -m app.seed` resets the database and should only be used when an intentional fresh sample dataset is wanted.
 
@@ -172,7 +203,7 @@ Only the scheduler can move a job into `assigned` or `unassigned`. Any other tra
 
 ### Hard constraints (never violated)
 
-1. The electrician has every required skill and covers the job's zone, and is active.
+1. The electrician is active. Ordinary dispatcher jobs require every listed skill and zone coverage; customer bookings use registered service locality and do not depend on legacy skill or zone tags.
 2. The job (plus the travel before it) lies inside a shift, which may extend up to the electrician's overtime allowance.
 3. The job starts and ends inside its time window, and never starts before the planning clock.
 4. No overlap with other jobs, unavailable periods, or an in-progress job. Travel time between consecutive jobs is always included.
@@ -199,7 +230,7 @@ saving, and change penalties make the schedule stable. Weights are defined in `s
 ### Procedure (deterministic; ties are broken by IDs)
 
 1. **Eligibility.** For each job, collect the *routes* `(electrician, shift instance)` where the electrician has the skills
-   and zone and the shift overlaps the job's window.
+   and the applicable eligibility rule (skills and zone for dispatcher jobs; service locality for customer bookings), and the shift overlaps the job's window.
 2. **Keep pass (protect existing assignments).** Previous assignments are replayed on their original electrician in their
    original order. Those that are still feasible are kept; the rest are marked *displaced*, with the exact reason
    (for example "unavailable 08:00–17:00, so the job would finish after the window closes").
@@ -223,7 +254,7 @@ saving, and change penalties make the schedule stable. Weights are defined in `s
 
 ### Complexity
 
-Let *n* be the number of jobs, *m* the eligible routes per job (after skill/zone/shift filtering, usually far below the
+Let *n* be the number of jobs, *m* the eligible routes per job (after skill/coverage/shift filtering, usually far below the
 number of electricians × days), *r* the jobs per route, and *u* the unavailable periods per electrician.
 
 - Evaluating a route: O(r·u). Results are memoised per (route, sequence).

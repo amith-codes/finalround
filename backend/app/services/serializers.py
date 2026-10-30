@@ -61,6 +61,8 @@ def booking_stage(job: Job, request_status: str | None) -> str:
     if job.status in (JobStatus.CANCELLED.value, JobStatus.COMPLETED.value, JobStatus.IN_PROGRESS.value):
         return job.status
     if job.status == JobStatus.ASSIGNED.value:
+        if request_status == "released":
+            return "reassignment_needed"
         return "accepted" if request_status == "accepted" else "awaiting_response"
     if request_status in ("declined", "released"):
         return "reassignment_needed"
@@ -70,10 +72,12 @@ def booking_stage(job: Job, request_status: str | None) -> str:
 def job_dict(job: Job, now: datetime | None = None) -> dict:
     now = now or datetime.now()
     latest_event = job.booking_events[-1] if job.booking_events else None
+    assignments = job.assignments
+    active_assignment = job.active_assignment
     request_event = next((event for event in reversed(job.booking_events)
                           if event.action in {"booking_requested", "manually_assigned", "accepted", "declined",
                                               "decline", "assigned", "reassigned", "unassigned", "cancel",
-                                              "customer_unavailable", "availability_cancelled_assignment"}), None)
+                                              "customer_unavailable", "availability_cancelled_assignment", "disturbed"}), None)
     request_status = None
     if request_event:
         request_status = {
@@ -81,7 +85,27 @@ def job_dict(job: Job, now: datetime | None = None) -> dict:
             "assigned": "pending", "reassigned": "pending", "accepted": "accepted",
             "declined": "declined", "decline": "declined", "unassigned": "released", "cancel": "released",
             "customer_unavailable": "released", "availability_cancelled_assignment": "released",
+            "disturbed": "released",
         }[request_event.action]
+    last_disturbance = next((event for event in reversed(job.booking_events)
+                             if event.action in {"disturbed", "cancel", "decline"}), None)
+    disturbance = None
+    if last_disturbance:
+        old_assignment = next((a for a in reversed(assignments)
+                               if a.electrician_id == last_disturbance.old_electrician_id), None)
+        replacement = (active_assignment.electrician.name
+                       if active_assignment and active_assignment.electrician
+                       and active_assignment.electrician_id != last_disturbance.old_electrician_id else None)
+        disturbance = {
+            "action": last_disturbance.action,
+            "electrician_name": old_assignment.electrician.name if old_assignment and old_assignment.electrician else None,
+            "reason": last_disturbance.reason,
+            "created_at": last_disturbance.created_at,
+            "replacement_electrician": replacement,
+            "reassignment_status": ("awaiting_reassignment" if job.status == JobStatus.UNASSIGNED.value
+                                     else "awaiting_response" if replacement and job.status == JobStatus.ASSIGNED.value
+                                     else "reassigned" if replacement else "recovering"),
+        }
     return {
         "id": job.id,
         "job_number": job.job_number,
@@ -100,10 +124,12 @@ def job_dict(job: Job, now: datetime | None = None) -> dict:
         "customer_phone": job.booking_details.customer_phone if job.booking_details else None,
         "booking_amount": job.booking_details.amount if job.booking_details else 0,
         "payment_status": job.booking_details.payment_status if job.booking_details else "pending",
+        "payment_method": job.payment_choice.method if job.payment_choice else "cash_on_service",
         "booking_action": latest_event.action if latest_event else None,
         "request_status": request_status,
         "booking_stage": booking_stage(job, request_status),
         "booking_update_reason": latest_event.reason if latest_event else None,
+        "last_disruption": disturbance,
         "priority": job.priority,
         "duration_minutes": job.duration_minutes,
         "required_skills": [s.code for s in job.required_skills],
@@ -117,7 +143,7 @@ def job_dict(job: Job, now: datetime | None = None) -> dict:
         "actual_end": job.actual_end,
         "cancel_reason": job.cancel_reason,
         "sla_state": sla_state(job, now),
-        "assignment": assignment_dict(job.active_assignment),
+        "assignment": assignment_dict(active_assignment),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }

@@ -7,12 +7,16 @@ import { Card, Empty, ErrorBox, Loading, ReasonDialog } from '../components/ui'
 function BookingRequest({ job, electrician, onAction }) {
   const [busy, setBusy] = useState(false)
   const [askingToDecline, setAskingToDecline] = useState(false)
+  const [askingToDisturb, setAskingToDisturb] = useState(false)
+  const [askingToCancel, setAskingToCancel] = useState(false)
 
   const act = async (action, reason = null) => {
     setBusy(true)
     try {
       await onAction(electrician.id, job.id, action, reason)
       setAskingToDecline(false)
+      setAskingToDisturb(false)
+      setAskingToCancel(false)
     } catch {
       // The dashboard reports action errors in a toast.
     } finally {
@@ -28,6 +32,7 @@ function BookingRequest({ job, electrician, onAction }) {
   const statusLabel = pending ? 'Awaiting response'
     : job.status === 'assigned' ? 'Accepted'
       : job.status === 'in_progress' ? 'In progress' : job.status
+  const canReportDisturbed = job.booking_stage === 'accepted' && job.status === 'assigned'
 
   return <article className="electrician-booking-card">
     <div className="electrician-booking-title">
@@ -48,6 +53,12 @@ function BookingRequest({ job, electrician, onAction }) {
       <button className="btn primary small" disabled={busy} onClick={() => act(action)}>
         {busy ? 'Updating…' : actionLabel}
       </button>
+        {canReportDisturbed && <button className="btn danger small" disabled={busy} onClick={() => setAskingToDisturb(true)}>
+          Disturbed
+        </button>}
+        {canReportDisturbed && <button className="btn danger small" disabled={busy} onClick={() => setAskingToCancel(true)}>
+          Cancel service
+        </button>}
       {pending && <button className="btn danger small" disabled={busy} onClick={() => setAskingToDecline(true)}>
         Decline
       </button>}
@@ -59,6 +70,22 @@ function BookingRequest({ job, electrician, onAction }) {
       busy={busy}
       onClose={() => setAskingToDecline(false)}
       onSubmit={(reason) => act('decline', reason)}
+    />}
+    {askingToDisturb && <ReasonDialog
+      title={`Report disruption · ${job.job_number}`}
+      prompt="Why can't you reach or attend this booking? (required)"
+      confirmLabel="Report disruption"
+      busy={busy}
+      onClose={() => setAskingToDisturb(false)}
+      onSubmit={(reason) => act('disturbed', reason)}
+    />}
+    {askingToCancel && <ReasonDialog
+      title={`Cancel service · ${job.job_number}`}
+      prompt="Why are you cancelling this service? (required)"
+      confirmLabel="Cancel and reassign"
+      busy={busy}
+      onClose={() => setAskingToCancel(false)}
+      onSubmit={(reason) => act('cancel', reason)}
     />}
   </article>
 }
@@ -118,13 +145,25 @@ export default function ElectricianPortal() {
 
   const act = async (electricianId, jobId, action, reason) => {
     try {
-      await Api.electricianAction(jobId, action, reason, home?.all_electricians ? electricianId : undefined)
+      const result = await Api.electricianAction(jobId, action, reason, home?.all_electricians ? electricianId : undefined)
       const messages = {
         accept: 'Booking accepted', decline: 'Booking declined',
         start: 'Booking marked in progress', complete: 'Service completed',
       }
-      toast(messages[action] || 'Booking updated', 'success')
+      const recoveryAction = action === 'disturbed' || action === 'cancel'
+        || action === 'decline' && result.last_disruption?.action === 'decline'
+      const recoveryLabel = action === 'cancel' ? 'Service cancelled'
+        : action === 'decline' ? 'Request declined' : 'Disruption reported'
+      const successMessage = recoveryAction
+        ? result.booking_stage === 'reassignment_needed'
+          ? `${recoveryLabel}. The booking remains active and is awaiting dispatcher reassignment.`
+          : result.booking_stage === 'awaiting_response'
+            ? `${recoveryLabel}. A replacement electrician has been asked to accept the booking.`
+            : `${recoveryLabel}. The booking remains active.`
+        : messages[action] || 'Booking updated'
+      toast(successMessage, 'success')
       await load()
+      return result
     } catch (e) {
       toast(errorMessage(e), 'error')
       throw e

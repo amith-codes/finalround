@@ -4,17 +4,14 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.models import Assignment, Electrician, ElectricianLocality, Job, ServiceZone, Shift, Skill, UnavailablePeriod
 from app.models.enums import JobStatus
+from app.scheduling.locality import same_locality
 from app.schemas import ElectricianCreate, ElectricianUpdate, ShiftIn, UnavailableIn
 from app.services.errors import ApiError, not_found
 
 
 def serves_locality(electrician: Electrician, locality: str) -> bool:
-    """Whether the electrician is registered to serve this exact customer locality."""
-    wanted = " ".join(locality.split()).casefold()
-    return bool(wanted) and any(
-        " ".join(area.locality.split()).casefold() == wanted
-        for area in electrician.service_localities
-    )
+    """Whether a registered service area matches the customer's locality label."""
+    return any(same_locality(area.locality, locality) for area in electrician.service_localities)
 
 
 def get_electrician(db: Session, eid: int) -> Electrician:
@@ -100,10 +97,19 @@ def update_electrician(db: Session, e: Electrician, data: ElectricianUpdate) -> 
         e.shifts = _shifts(data.shifts)
     if "localities" in fields:
         values = fields.pop("localities")
-        e.service_localities = [
-            ElectricianLocality(locality=x.strip())
-            for x in sorted({v.strip() for v in values if v.strip()}, key=str.casefold)
-        ]
+        wanted = sorted({v.strip() for v in values if v.strip()}, key=str.casefold)
+        wanted_set = set(wanted)
+        removed = [area for area in e.service_localities if area.locality not in wanted_set]
+        for area in removed:
+            e.service_localities.remove(area)
+        if removed:
+            # Delete removed rows before inserting replacements; the table enforces
+            # uniqueness per electrician/locality, and edit forms resubmit unchanged values.
+            db.flush()
+        existing = {area.locality for area in e.service_localities}
+        e.service_localities.extend(
+            ElectricianLocality(locality=value) for value in wanted if value not in existing
+        )
     if fields.get("active") is False and e.active:
         if in_progress_by_electrician(db).get(e.id):
             raise ApiError(409, "ELECTRICIAN_ON_JOB", "Cannot deactivate an electrician with a job in progress.")

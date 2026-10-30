@@ -21,6 +21,16 @@ AUTH_DISABLED = _bool("DISPATCHGRID_AUTH_DISABLED", False)
 DEFAULT_ADMIN_USERNAME = os.getenv("DISPATCHGRID_ADMIN_USER", "dispatcher")
 DEFAULT_ADMIN_PASSWORD = os.getenv("DISPATCHGRID_ADMIN_PASSWORD", "dispatch123")
 
+# Twilio booking confirmations are skipped until credentials and a sender are configured.
+TWILIO_ACCOUNT_SID = os.getenv("DISPATCHGRID_TWILIO_ACCOUNT_SID", "").strip()
+TWILIO_AUTH_TOKEN = os.getenv("DISPATCHGRID_TWILIO_AUTH_TOKEN", "").strip()
+TWILIO_FROM_NUMBER = os.getenv("DISPATCHGRID_TWILIO_FROM_NUMBER", "").strip()
+TWILIO_MESSAGING_SERVICE_SID = os.getenv("DISPATCHGRID_TWILIO_MESSAGING_SERVICE_SID", "").strip()
+
+# Razorpay payment QR credentials. The secret is only used by the backend.
+RAZORPAY_KEY_ID = os.getenv("DISPATCHGRID_RAZORPAY_KEY_ID", "").strip()
+RAZORPAY_KEY_SECRET = os.getenv("DISPATCHGRID_RAZORPAY_KEY_SECRET", "").strip()
+
 # How long a scheduling request waits for another in-flight run before giving up with 409.
 SCHEDULER_LOCK_TIMEOUT_SECONDS = float(os.getenv("DISPATCHGRID_SCHEDULER_LOCK_TIMEOUT", "30"))
 # A run row left in "running" longer than this is considered stale (crashed worker).

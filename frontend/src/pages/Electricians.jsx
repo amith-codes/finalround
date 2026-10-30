@@ -66,7 +66,6 @@ export default function Electricians() {
   const toast = useToast()
   const [params, setParams] = useSearchParams()
   const [statusFilter, setStatusFilter] = useState(params.get('status') || 'active')
-  const [serviceAreaFilter, setServiceAreaFilter] = useState('')
   const [localityFilter, setLocalityFilter] = useState('')
   const [modal, setModal] = useState(() => (params.get('register') ? { mode: 'create' } : null)) // {mode: 'create'|'edit'|'unavail', e?}
   const closeModal = () => {
@@ -130,9 +129,8 @@ export default function Electricians() {
       (statusFilter === 'available' && electrician.active && electrician.current_status === 'on_shift') ||
       (statusFilter === 'unavailable' && electrician.current_status === 'unavailable') ||
       (statusFilter === 'off_shift' && electrician.current_status === 'off_shift')
-    const areaMatch = !serviceAreaFilter || electrician.zones.includes(serviceAreaFilter)
     const localityMatch = !localityFilter || electrician.localities.some((locality) => locality.toLowerCase().includes(localityFilter.trim().toLowerCase()))
-    return statusMatch && areaMatch && localityMatch
+    return statusMatch && localityMatch
   })
 
   return (
@@ -153,16 +151,13 @@ export default function Electricians() {
             <option value="active">Active</option><option value="all">All</option><option value="inactive">Inactive</option>
             <option value="available">Available now</option><option value="unavailable">Unavailable</option><option value="off_shift">Off shift</option>
           </select></label>
-          <label>Service area<select value={serviceAreaFilter} onChange={(event) => setServiceAreaFilter(event.target.value)}>
-            <option value="">All service areas</option>{data.zones.map((zone) => <option key={zone.code} value={zone.code}>{zone.name}</option>)}
-          </select></label>
           <label>Locality<input value={localityFilter} onChange={(event) => setLocalityFilter(event.target.value)} placeholder="Search service locality" /></label>
         </div>
       </Card>
       <Card>
         <div className="table-wrap">
           <table className="table">
-            <thead><tr><th>Electrician</th><th>Profile</th><th>Now</th><th>Zones</th><th>Shifts</th><th>Unavailable</th><th /></tr></thead>
+            <thead><tr><th>Electrician</th><th>Profile</th><th>Now</th><th>Service locality</th><th>Shifts</th><th>Unavailable</th><th /></tr></thead>
             <tbody>
               {filteredElectricians.map((e) => {
                 const displayedStatus = e.active ? 'on_job' : e.current_status
@@ -171,7 +166,7 @@ export default function Electricians() {
                   <td><b>{e.name}</b><div className="muted small">{e.employee_code} · OT {e.max_overtime_minutes} min</div></td>
                   <td><span className={`badge ${e.active ? 'avail-on_shift' : 'avail-inactive'}`}>{e.active ? 'Active' : 'Inactive'}</span></td>
                   <td><span className={`badge avail-${displayedStatus}`}>{humanize(displayedStatus)}</span></td>
-                  <td>{e.zones.join(', ')}<div className="muted small">Localities: {e.localities.join(', ') || 'Not set'}</div><div className="muted small">Base {Number(e.home_lat).toFixed(4)}, {Number(e.home_lon).toFixed(4)}</div></td>
+                  <td><div>{e.localities.join(', ') || 'Not set'}</div><div className="muted small">Base {Number(e.home_lat).toFixed(4)}, {Number(e.home_lon).toFixed(4)}</div></td>
                   <td className="small">{shiftSummary(e.shifts)}</td>
                   <td className="small">
                     {e.unavailable_periods.map((p) => <div key={p.id}>{fmtDateTime(p.start)} → {fmtDateTime(p.end)}</div>)}

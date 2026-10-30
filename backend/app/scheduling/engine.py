@@ -2,8 +2,9 @@
 
 Algorithm (deterministic, see README "Scheduling algorithm"):
 
-1. Eligibility filter - per job, the (electrician, shift) routes whose electrician has every
-   required skill, covers the job's zone and has a shift overlapping the job's time window.
+1. Eligibility filter - per job, the (electrician, shift) routes whose electrician meets the
+   applicable skill and zone/locality rules and has a shift overlapping the job's time window.
+   Customer bookings use service locality and do not require legacy skill or zone tags.
 2. Keep pass (incremental mode) - previous assignments are re-validated in their original order
    on their original electrician. Still-feasible ones are kept, the rest become "displaced".
 3. Construction - remaining jobs are inserted, most important first (priority, then fewest
@@ -23,6 +24,7 @@ from dataclasses import dataclass, field
 
 from app.models.enums import PRIORITY_RANK
 from app.scheduling.diagnosis import diagnose
+from app.scheduling.locality import locality_key
 from app.scheduling.routes import Evaluator, RouteKey, fmt
 from app.scheduling.types import JobInput, Problem, SolveResult, TechInput, UnassignedJob, Visit
 
@@ -60,14 +62,16 @@ class Scheduler:
         self.eligible: dict[int, list[TechInput]] = {}
         self.keys: dict[int, list[RouteKey]] = {}
         for job in problem.jobs:
-            techs = [t for t in problem.techs if job.skills <= t.skills and job.zone in t.zones]
+            techs = [t for t in problem.techs
+                     if (not job.skills_required or job.skills <= t.skills)
+                     and (not job.zone_required or job.zone in t.zones)]
             if job.manual_tech_id is not None:
                 techs = [t for t in techs if t.id == job.manual_tech_id]
             else:
                 techs = [t for t in techs if t.id not in job.excluded_tech_ids]
             if job.locality and job.manual_tech_id is None:
-                key = job.locality.strip().casefold()
-                techs = [t for t in techs if key in {x.strip().casefold() for x in t.localities}]
+                key = locality_key(job.locality)
+                techs = [t for t in techs if key and key in {locality_key(x) for x in t.localities}]
             techs.sort(key=lambda t: t.id)
             self.eligible[job.id] = techs
             self.keys[job.id] = [
@@ -121,7 +125,13 @@ class Scheduler:
                 continue
             tech = self.ev.techs.get(pa.tech_id)
             if tech is None or tech not in self.eligible[jid]:
-                sol.notes[jid] = "Previous electrician is no longer eligible (inactive, skills or zones changed)."
+                job = self.jobs[jid]
+                if not job.skills_required and not job.zone_required:
+                    sol.notes[jid] = (
+                        f"Previous assignment was released; checking active electricians serving {job.locality}."
+                    )
+                else:
+                    sol.notes[jid] = "Previous electrician is no longer eligible (inactive, skills or zone coverage changed)."
                 sol.unassigned.add(jid)
                 continue
             idx = next(
@@ -334,7 +344,10 @@ class Scheduler:
         skills = ", ".join(sorted(job.skills)) or "none"
         parts = [
             f"{tech.name} {fmt(v.start)}-{v.end:%H:%M}:",
-            f"has required skills ({skills}) and covers zone {job.zone};",
+            (f"has required skills ({skills}) and covers zone {job.zone};"
+             if job.skills_required and job.zone_required else
+             f"has required skills ({skills}) and serves {job.locality};"
+             if job.skills_required else f"serves {job.locality} without legacy skill or zone tags;"),
             f"{v.travel_minutes} min travel from {v.travel_from};",
             f"best-cost choice among {n} eligible electrician{'s' if n != 1 else ''}.",
         ]

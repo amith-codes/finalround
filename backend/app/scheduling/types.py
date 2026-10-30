@@ -35,6 +35,12 @@ class JobInput:
     locality: str | None = None
     excluded_tech_ids: frozenset[int] = field(default_factory=frozenset)
     manual_tech_id: int | None = None
+    # Customer bookings are dispatched by their registered service locality;
+    # legacy service-zone tags remain mandatory for ordinary dispatcher jobs.
+    zone_required: bool = True
+    # A customer can select any available electrician in the service locality,
+    # even when the catalog's skill tags are incomplete or outdated.
+    skills_required: bool = True
 
 
 @dataclass(frozen=True)

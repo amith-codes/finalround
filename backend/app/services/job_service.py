@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import Assignment, BookingDetails, Job, ServiceZone, Skill
+from app.models import Assignment, BookingDetails, BookingPaymentChoice, Job, ServiceZone, Skill
 from app.models.enums import JobStatus
 from app.schemas import JobCreate, JobUpdate
 from app.services.errors import ApiError, not_found
@@ -113,6 +113,7 @@ def create_job(db: Session, data: JobCreate) -> Job:
             locality=data.service_locality, district=data.district, state=data.state,
             service_category=data.service_category, customer_phone=data.customer_phone, amount=booking_amount,
         )
+    job.payment_choice = BookingPaymentChoice(method=data.payment_method)
     return job
 
 

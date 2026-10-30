@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, Header, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,10 +13,12 @@ from app.services.booking_availability import available_slot
 from app.services.electrician_service import get_electrician, serves_locality
 from app.services.errors import ApiError, not_found
 from app.services.idempotency import idempotent
+from app.services.sms_service import normalize_phone_number, send_booking_confirmation
 from app.models.enums import JobStatus
 from app.services.serializers import job_dict
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+log = logging.getLogger("dispatchgrid.bookings")
 
 
 @router.post("", status_code=201, summary="Create a service job (supports Idempotency-Key)")
@@ -27,6 +31,9 @@ def create_job(data: JobCreate, db: Session = Depends(get_db),
     if user is not None and role == "customer" and not data.service_items:
         raise ApiError(422, "SERVICE_ITEMS_REQUIRED", "Select one or more catalog services before booking.")
     if user is not None and role == "customer":
+        if normalize_phone_number(data.customer_phone) is None:
+            raise ApiError(422, "CUSTOMER_PHONE_REQUIRED",
+                           "Enter a valid mobile number to receive your booking confirmation by SMS.")
         if data.requested_electrician_id is None:
             raise ApiError(422, "ELECTRICIAN_REQUIRED", "Choose an available electrician before requesting a booking.")
         if not data.address or not data.service_locality or not data.district or not data.state:
@@ -37,10 +44,12 @@ def create_job(data: JobCreate, db: Session = Depends(get_db),
             data = data.model_copy(update={"zone_code": nearest.code})
     def handler():
         job = job_service.create_job(db, data)
+        selected_electrician = None
         if user and role == "customer":
             db.add(BookingOwner(job_id=job.id, user_id=user.id))
             db.flush()
             electrician = get_electrician(db, data.requested_electrician_id)
+            selected_electrician = electrician
             if not electrician.active or not serves_locality(electrician, data.service_locality or ""):
                 raise ApiError(409, "ELECTRICIAN_LOCALITY_MISMATCH",
                                "Choose an active electrician registered to serve the selected locality.")
@@ -66,6 +75,21 @@ def create_job(data: JobCreate, db: Session = Depends(get_db),
                                 action="booking_requested", from_status="pending", to_status="assigned",
                                 new_electrician_id=electrician.id))
         db.commit()
+        if user and role == "customer":
+            try:
+                send_booking_confirmation(
+                    phone=data.customer_phone,
+                    customer_name=data.customer_name,
+                    job_number=job.job_number,
+                    service_title=job.title,
+                    window_start=job.window_start,
+                    window_end=job.window_end,
+                    electrician_name=selected_electrician.name if selected_electrician else None,
+                )
+            except Exception:
+                # A Twilio failure must not turn a committed booking into an API error
+                # or make an idempotent client retry create a duplicate booking.
+                log.exception("SMS confirmation failed after booking %s was saved.", job.job_number)
         return job_dict(job_service.get_job(db, job.id))
 
     scope = f"POST /api/jobs user:{user.id if user else 'admin'}"

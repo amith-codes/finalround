@@ -74,6 +74,8 @@ export const Api = {
   jobSchedule: (id) => api.get(`/scheduling/jobs/${id}`).then((r) => r.data),
 
   customerBookings: () => api.get('/portal/customer/bookings').then((r) => r.data),
+  customerBookingPaymentQr: (jobId) => api.post(`/portal/customer/bookings/${jobId}/payment/qr`).then((r) => r.data),
+  customerBookingPaymentStatus: (jobId) => api.get(`/portal/customer/bookings/${jobId}/payment/status`).then((r) => r.data),
   submitCustomerFeedback: (jobId, body) => api.post(`/portal/customer/bookings/${jobId}/feedback`, body).then((r) => r.data),
   submitCustomerComplaint: (jobId, body) => api.post(`/portal/customer/bookings/${jobId}/complaint`, body).then((r) => r.data),
   customerLocalities: (zoneCode) => api.get('/portal/customer/localities', { params: { zone_code: zoneCode } }).then((r) => r.data),

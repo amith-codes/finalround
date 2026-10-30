@@ -5,7 +5,10 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import Assignment, AvailabilityOverride, BookingDecline, Electrician, Job, ManualDispatchOverride
+from app.models import (
+    Assignment, AvailabilityOverride, BookingDecline, BookingDetails, BookingOwner,
+    Electrician, Job, ManualDispatchOverride,
+)
 from app.models.enums import SCHEDULABLE_STATUSES, JobStatus
 from app.scheduling.types import Anchor, Interval, JobInput, PriorAssignment, Problem, TechInput
 
@@ -27,6 +30,7 @@ def load_jobs(db: Session, statuses) -> list[Job]:
             selectinload(Job.required_skills),
             selectinload(Job.zone),
             selectinload(Job.assignments).selectinload(Assignment.electrician),
+            selectinload(Job.booking_events),
         )
         .order_by(Job.id)
     ))
@@ -88,6 +92,11 @@ def _anchors(db: Session, now: datetime) -> tuple[dict[int, Anchor], list[Assign
 def build_problem(db: Session, now: datetime) -> tuple[Problem, ProblemContext]:
     jobs = load_jobs(db, list(SCHEDULABLE_STATUSES))
     electricians = load_electricians(db)
+    customer_job_ids = set()
+    if jobs:
+        job_ids = [job.id for job in jobs]
+        customer_job_ids.update(db.scalars(select(BookingOwner.job_id).where(BookingOwner.job_id.in_(job_ids))))
+        customer_job_ids.update(db.scalars(select(BookingDetails.job_id).where(BookingDetails.job_id.in_(job_ids))))
     overrides = {o.electrician_id: o.is_available for o in db.scalars(select(AvailabilityOverride))}
     declines: dict[int, set[int]] = {}
     for d in db.scalars(select(BookingDecline).where(BookingDecline.job_id.in_([j.id for j in jobs]))):
@@ -123,6 +132,11 @@ def build_problem(db: Session, now: datetime) -> tuple[Problem, ProblemContext]:
     job_inputs = []
     prior = {}
     for j in jobs:
+        locality = j.booking_details.locality if j.booking_details else None
+        if j.id in customer_job_ids and not (locality and locality.strip()):
+            # Never let automatic dispatch treat a customer request with no known locality
+            # as a city-wide job. Dispatch must resolve the location manually first.
+            locality = "__customer_locality_missing__"
         job_inputs.append(JobInput(
             id=j.id,
             priority=j.priority,
@@ -135,14 +149,24 @@ def build_problem(db: Session, now: datetime) -> tuple[Problem, ProblemContext]:
             window_end=j.window_end,
             sla_deadline=j.sla_deadline,
             label=j.job_number or "",
-            locality=j.booking_details.locality if j.booking_details else None,
+            locality=locality,
             excluded_tech_ids=frozenset(declines.get(j.id, set())),
             manual_tech_id=manual_overrides.get(j.id),
+            zone_required=j.id not in customer_job_ids,
+            skills_required=j.id not in customer_job_ids,
         ))
         a = j.active_assignment
         if a is not None:
             # Priors on deactivated electricians still count, so the change is reported as a reassignment.
             prior[j.id] = PriorAssignment(j.id, a.electrician_id, a.start, a.end)
+        elif j.booking_events and j.booking_events[-1].action in {"disturbed", "cancel", "decline"}:
+            # A disturbance releases the active row before recovery; retain its last slot
+            # as the scheduler's prior so old -> replacement changes remain auditable.
+            released = j.booking_events[-1]
+            previous = next((row for row in reversed(j.assignments)
+                             if row.electrician_id == released.old_electrician_id), None)
+            if previous is not None:
+                prior[j.id] = PriorAssignment(j.id, previous.electrician_id, previous.start, previous.end)
 
     problem = Problem(now=now, jobs=job_inputs, techs=techs, prior=prior)
     ctx = ProblemContext(

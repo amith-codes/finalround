@@ -174,10 +174,22 @@ export default function CustomerBookings() {
         <div><small>Service address</small><b>{job.address || 'Address on booking'}</b></div>
         <div><small>Locality</small><b>{[job.service_locality, job.district, job.state].filter(Boolean).join(', ') || job.zone_name}</b></div>
         <div><small>Electrician</small><b>{job.assignment?.electrician_name || (job.booking_stage === 'reassignment_needed' ? 'Awaiting reassignment' : job.status === 'cancelled' ? '—' : 'Being matched')}</b></div>
-        <div><small>Total (incl. visit fee and discounts)</small><b>{rupees(job.booking_amount)}</b><small>Payment {job.payment_status || 'pending'}</small></div>
+        <div><small>Total (incl. visit fee and discounts)</small><b>{rupees(job.booking_amount)}</b>
+          <small>Payment: {job.payment_status || 'pending'}</small>
+          <small>Method: {job.payment_method === 'razorpay_qr' ? 'Razorpay UPI QR' : 'Cash on service'}</small>
+        </div>
       </div>
       {job.booking_stage === 'awaiting_response' && <p className="muted small">Your request has been sent. We’ll update this booking when the electrician responds.</p>}
-      {job.booking_stage === 'reassignment_needed' && <p className="alert warning"><b>Electrician declined this request.</b>{job.booking_update_reason ? ` Reason: ${job.booking_update_reason}` : ' The request is back with dispatch for another available electrician.'}</p>}
+      {job.last_disruption && <p className="alert warning" role="status">
+        <b>{job.last_disruption.electrician_name || 'The assigned electrician'} {job.last_disruption.action === 'decline' ? 'declined this request.' : job.last_disruption.action === 'cancel' ? 'cancelled this assignment.' : 'reported a disruption.'}</b>{' '}
+        {job.status === 'cancelled'
+          ? 'This booking was later cancelled.'
+          : job.last_disruption.replacement_electrician
+            ? `Reassigned to ${job.last_disruption.replacement_electrician}${job.booking_stage === 'awaiting_response' ? ' and awaiting their response.' : '.'}`
+            : 'The booking remains active and is awaiting dispatcher reassignment.'}
+        {job.last_disruption.reason && <><br /><b>Reason:</b> {job.last_disruption.reason}</>}
+      </p>}
+      {job.booking_stage === 'reassignment_needed' && !job.last_disruption && <p className="alert warning"><b>Electrician declined this request.</b>{job.booking_update_reason ? ` Reason: ${job.booking_update_reason}` : ' The request is back with dispatch for another available electrician.'}</p>}
       {job.booking_update_reason && job.request_status !== 'declined' && !job.cancel_reason && <p className="muted small">Latest update: {job.booking_update_reason}</p>}
       {job.cancel_reason && <p className="muted small">Latest update: {job.cancel_reason}</p>}
       <div className="row gap wrap customer-booking-actions">
