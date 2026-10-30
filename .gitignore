@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+backend/venv/
+.venv/
+.pytest_cache/
+
+# SQLite database (regenerate with `python -m app.seed`)
+*.db
+*.db-shm
+*.db-wal
+
+# Local environment files and runtime logs
+.env
+.env.*
+!.env.example
+*.log
+
+# Node / Vite
+frontend/node_modules/
+frontend/dist/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
