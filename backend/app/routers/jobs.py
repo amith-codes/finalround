@@ -6,11 +6,12 @@ from app.database import get_db
 from app.models import Assignment, BookingEvent, BookingOwner, ManualDispatchOverride, ServiceZone, UserProfile
 from app.schemas import JobCreate, JobStart, JobUpdate
 from app.services import job_service
-from app.services.auth import require_role, require_user
+from app.services.auth import active_role, require_role, require_user
+from app.services.booking_availability import available_slot
+from app.services.electrician_service import get_electrician, serves_locality
 from app.services.errors import ApiError, not_found
 from app.services.idempotency import idempotent
-from app.services.scheduling_service import execute_run, scheduler_lock
-from app.models.enums import RunMode
+from app.models.enums import JobStatus
 from app.services.serializers import job_dict
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -20,11 +21,14 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 def create_job(data: JobCreate, db: Session = Depends(get_db),
                idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
                user=Depends(require_user)):
-    if user is not None and user.role not in ("admin", "customer"):
+    role = active_role(user) if user is not None else "admin"
+    if user is not None and role not in ("admin", "customer"):
         raise ApiError(403, "FORBIDDEN", "Only customers and administrators can create bookings.")
-    if user is not None and user.role == "customer" and not data.service_items:
+    if user is not None and role == "customer" and not data.service_items:
         raise ApiError(422, "SERVICE_ITEMS_REQUIRED", "Select one or more catalog services before booking.")
-    if user is not None and user.role == "customer":
+    if user is not None and role == "customer":
+        if data.requested_electrician_id is None:
+            raise ApiError(422, "ELECTRICIAN_REQUIRED", "Choose an available electrician before requesting a booking.")
         if not data.address or not data.service_locality or not data.district or not data.state:
             raise ApiError(422, "SERVICE_ADDRESS_REQUIRED", "Add the full service address, locality, district and state.")
         zones = list(db.scalars(select(ServiceZone)))
@@ -33,14 +37,35 @@ def create_job(data: JobCreate, db: Session = Depends(get_db),
             data = data.model_copy(update={"zone_code": nearest.code})
     def handler():
         job = job_service.create_job(db, data)
-        if user and user.role == "customer":
+        if user and role == "customer":
             db.add(BookingOwner(job_id=job.id, user_id=user.id))
+            db.flush()
+            electrician = get_electrician(db, data.requested_electrician_id)
+            if not electrician.active or not serves_locality(electrician, data.service_locality or ""):
+                raise ApiError(409, "ELECTRICIAN_LOCALITY_MISMATCH",
+                               "Choose an active electrician registered to serve the selected locality.")
+            slot = available_slot(db, electrician, window_start=job.window_start,
+                                  window_end=job.window_end, duration_minutes=job.duration_minutes,
+                                  ignore_job_id=job.id)
+            if slot is None:
+                raise ApiError(409, "ELECTRICIAN_NO_LONGER_AVAILABLE",
+                               "That electrician is no longer available for this appointment time. Refresh the list and choose another.")
+            assignment = Assignment(job_id=job.id, electrician_id=electrician.id,
+                                    start=slot[0], end=slot[1], travel_minutes=0,
+                                    explanation="Customer selected this electrician; awaiting response.",
+                                    is_active=True)
+            db.add(assignment)
+            db.add(ManualDispatchOverride(job_id=job.id, electrician_id=electrician.id,
+                                          reason="Customer-selected electrician; awaiting response.", active=True))
+            job.status = JobStatus.ASSIGNED.value
+            job.feasibility = "feasible"
+            job.unassigned_reasons = None
             db.add(BookingEvent(job_id=job.id, actor_user_id=user.id, actor_role="customer",
-                                action="booking_created", to_status="pending"))
+                                action="booking_created", from_status=None, to_status="pending"))
+            db.add(BookingEvent(job_id=job.id, actor_user_id=user.id, actor_role="customer",
+                                action="booking_requested", from_status="pending", to_status="assigned",
+                                new_electrician_id=electrician.id))
         db.commit()
-        if user and user.role == "customer":
-            with scheduler_lock():
-                execute_run(db, trigger="customer_booking", mode=RunMode.INCREMENTAL)
         return job_dict(job_service.get_job(db, job.id))
 
     scope = f"POST /api/jobs user:{user.id if user else 'admin'}"
@@ -52,9 +77,10 @@ def list_jobs(status: str | None = Query(default=None), priority: str | None = Q
               zone: str | None = Query(default=None), db: Session = Depends(get_db),
               user=Depends(require_user)):
     jobs = job_service.list_jobs(db, status, priority, zone)
-    if user is None or user.role == "admin":
+    role = active_role(user) if user is not None else "admin"
+    if user is None or role == "admin":
         return [job_dict(j) for j in jobs]
-    if user.role == "customer":
+    if role == "customer":
         owned = set(db.scalars(select(BookingOwner.job_id).where(BookingOwner.user_id == user.id)))
         return [job_dict(j) for j in jobs if j.id in owned]
     profile = db.scalar(select(UserProfile).where(UserProfile.user_id == user.id))
@@ -95,16 +121,17 @@ def cancel_job(job_id: int, reason: str | None = Query(default=None), db: Sessio
     if manual:
         manual.active = False
     db.add(BookingEvent(job_id=job.id, actor_user_id=user.id if user else None,
-                        actor_role=user.role if user else "system", action="cancelled",
+                        actor_role=active_role(user) if user else "system", action="cancelled",
                         from_status=before, to_status=job.status, reason=reason or "Cancelled via API"))
     db.commit()
     return job_dict(job_service.get_job(db, job_id))
 
 
 def _check_visible(db: Session, job_id: int, user, job=None):
-    if user is None or user.role == "admin":
+    role = active_role(user) if user is not None else "admin"
+    if user is None or role == "admin":
         return
-    if user.role == "customer":
+    if role == "customer":
         owned = db.scalar(select(BookingOwner.job_id).where(
             BookingOwner.job_id == job_id, BookingOwner.user_id == user.id))
         if owned is None:

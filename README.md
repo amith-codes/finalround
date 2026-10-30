@@ -32,7 +32,7 @@ uvicorn app.main:app --reload
 ```
 
 - API: http://127.0.0.1:8000 · Swagger UI: http://127.0.0.1:8000/docs
-- Login: **dispatcher / dispatch123**. In Swagger press *Authorize* and enter these credentials.
+- Admin login: **dispatcher / dispatch123**. In Swagger press *Authorize* and enter these credentials.
   Set `DISPATCHGRID_AUTH_DISABLED=1` to skip auth during local exploration.
 
 ### Frontend
@@ -47,15 +47,28 @@ Open http://localhost:5173. The Vite dev server proxies `/api` to the backend on
 
 ### Role-based booking portal
 
-The current project has one username/password sign-in backed by JWT; it does not contain an external SSO provider or OIDC configuration. The same sign-in screen routes users by the role stored on their server-side account.
+The current project uses one username/password sign-in backed by JWT; it does not contain an external SSO provider or OIDC configuration. The same sign-in screen routes users by a server-assigned role. The compact workspace switcher only offers roles granted to that account; changing the view does not change its permissions.
 
-- Sign in as the configured `dispatcher` administrator, open **Electricians**, and register each electrician with a sign-in name, initial password, skills, shifts, zones and service localities. Customers must enter the same locality name during booking for automatic locality dispatch.
+Local demo accounts (created at startup when the project database contains an electrician profile; `python -m app.seed` also creates a fresh sample set):
+
+| View | Username | Password |
+|---|---|---|
+| Admin | `dispatcher` | `dispatch123` |
+| Customer | `demo_customer` | `customer123` |
+| Electrician | `demo_electrician` | `electrician123` |
+
+The configured `dispatcher` admin account is also provisioned for the customer and electrician workspaces so you can switch views during local demos. Each view remains scoped to that account's own customer bookings or linked electrician profile. Other accounts only see roles granted by trusted backend setup.
+
+- Sign in as the configured `dispatcher` administrator, open **Electricians**, and register each electrician with a sign-in name, initial password, skills, shifts, zones and service localities. Customers must enter a matching service locality when booking.
 - Open **Customers** to provision customer accounts. Customer, electrician and admin accounts all use the same sign-in route. Role values are assigned by the server; account forms do not accept a role.
-- Customers use **Book electrician**, **Track booking status** and **Payment methods**. The existing service catalog page remains the booking page.
-- If no qualified, available electrician serves the requested locality, the booking remains unassigned for admin review. Admins can assign or reassign it from the booking detail view.
+- Customers use the existing service catalog and cart, choose any active electrician with no overlapping booking in the appointment window, then send a request. The picker ignores service area and skill matching; the chosen electrician reviews the service and accepts or declines it. Customers can track the request and the electrician's response from their bookings.
+- If no qualified, available electrician serves the requested locality, the customer can choose another appointment time or locality. A declined request is returned to local dispatch and remains visible to the admin for reassignment.
+- The electrician workspace lists direct customer requests separately from local dispatch offers. Electricians can accept or decline requests from their dashboard. A decline requires a non-empty reason (`422 REASON_REQUIRED`); the reason is stored as a booking event and shown on the customer's booking. Cancelling an assignment or reporting the customer unavailable also requires a reason. Customer phone numbers are hidden on offers until the electrician accepts.
+- Every booking response carries `booking_stage` (`awaiting_dispatch`, `awaiting_response`, `accepted`, `reassignment_needed`, `in_progress`, `completed`, `cancelled`), derived from the job status and its latest booking event. The customer view shows the scheduled arrival from the dispatch plan; there is no live location tracking.
+- The admin dashboard (`GET /api/portal/admin/overview`) reports orders received today, registered electricians (active and inactive), electricians available now (active, on shift, not on a job, no unavailable period or availability switch-off) and orders pending dispatch (open orders with no active assignment). `GET /api/portal/admin/booking-activity` lists electrician declines and booking cancellations with the reason and whether the booking still needs reassignment.
 - Payment methods save only a label, brand and last four digits. Card charging is not connected in this application; payment status can be updated by an admin.
 
-New role tables are created automatically on startup. Existing SQLite records are preserved; `python -m app.seed` resets the database and should only be used when an intentional fresh sample dataset is wanted.
+Role grant tables are created automatically on startup. Existing SQLite records are preserved; `python -m app.seed` resets the database and should only be used when an intentional fresh sample dataset is wanted.
 
 ### Seed data
 
@@ -326,5 +339,5 @@ saved schedule after each scenario.
 - The scheduler lock is per process; the run-row guard only partly covers multiple workers.
   For production, use PostgreSQL with advisory locks or a job queue.
 - No overnight shifts, no multi-day jobs, no breaks within shifts.
-- A single dispatcher role. No per-user permissions, and no push notifications to electricians.
+- Role grants are provisioned by the trusted backend; there is no role-grant management page or push notification service yet.
 - The engine's SLA policy (hard for urgent/high) is fixed in code (`HARD_SLA_PRIORITIES`); it could be made configurable per job.

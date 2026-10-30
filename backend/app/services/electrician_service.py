@@ -8,6 +8,15 @@ from app.schemas import ElectricianCreate, ElectricianUpdate, ShiftIn, Unavailab
 from app.services.errors import ApiError, not_found
 
 
+def serves_locality(electrician: Electrician, locality: str) -> bool:
+    """Whether the electrician is registered to serve this exact customer locality."""
+    wanted = " ".join(locality.split()).casefold()
+    return bool(wanted) and any(
+        " ".join(area.locality.split()).casefold() == wanted
+        for area in electrician.service_localities
+    )
+
+
 def get_electrician(db: Session, eid: int) -> Electrician:
     e = db.scalar(select(Electrician).where(Electrician.id == eid).options(
         selectinload(Electrician.skills), selectinload(Electrician.zones),

@@ -1,15 +1,28 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import AvailabilityOverride, ManualDispatchOverride, UnavailablePeriod, User, UserProfile
+from app.models import (
+    AvailabilityOverride,
+    Assignment,
+    BookingDecline,
+    BookingEvent,
+    BookingOwner,
+    DutySession,
+    ManualDispatchOverride,
+    ScheduleChange,
+    UnavailablePeriod,
+    User,
+    UserProfile,
+    UserRoleGrant,
+)
 from app.schemas import ElectricianCreate, ElectricianUpdate, UnavailableIn
 from app.services import electrician_service as svc
 from app.services.errors import ApiError, not_found
-from app.services.auth import hash_password
+from app.services.auth import grant_role, hash_password
 from app.services.problem_builder import load_electricians
 from app.services.serializers import electrician_dict
 
@@ -36,6 +49,7 @@ def create_electrician(data: ElectricianCreate, db: Session = Depends(get_db)):
         account = User(username=data.username, password_hash=hash_password(data.initial_password), role="electrician")
         db.add(account)
         db.flush()
+        grant_role(db, account, "electrician")
         db.add(UserProfile(user_id=account.id, electrician_id=e.id, display_name=e.name))
     db.commit()
     return _out(db, e.id)
@@ -84,6 +98,59 @@ def delete_electrician(electrician_id: int, db: Session = Depends(get_db)):
         "affected_job_ids": affected,
         "message": "Electrician deactivated. Run scheduling (or re-optimise) to reassign the affected jobs.",
     }
+
+
+@router.delete("/{electrician_id}/remove", summary="Permanently remove an electrician without booking history")
+def remove_electrician(electrician_id: int, db: Session = Depends(get_db)):
+    e = svc.get_electrician(db, electrician_id)
+    history_queries = (
+        select(Assignment.id).where(Assignment.electrician_id == electrician_id).limit(1),
+        select(ScheduleChange.id).where(or_(
+            ScheduleChange.old_electrician_id == electrician_id,
+            ScheduleChange.new_electrician_id == electrician_id,
+        )).limit(1),
+        select(BookingEvent.id).where(or_(
+            BookingEvent.old_electrician_id == electrician_id,
+            BookingEvent.new_electrician_id == electrician_id,
+        )).limit(1),
+        select(BookingDecline.id).where(BookingDecline.electrician_id == electrician_id).limit(1),
+        select(ManualDispatchOverride.job_id).where(
+            ManualDispatchOverride.electrician_id == electrician_id).limit(1),
+        select(DutySession.electrician_id).where(DutySession.electrician_id == electrician_id).limit(1),
+    )
+    if any(db.scalar(query) is not None for query in history_queries):
+        raise ApiError(
+            409,
+            "ELECTRICIAN_HAS_HISTORY",
+            "This electrician has booking or scheduling history and cannot be permanently deleted. Deactivate them to preserve their history.",
+        )
+
+    profile = db.scalar(select(UserProfile).where(UserProfile.electrician_id == electrician_id))
+    if profile is not None:
+        user = db.get(User, profile.user_id)
+        if user is not None:
+            if db.scalar(select(BookingOwner.job_id).where(BookingOwner.user_id == user.id).limit(1)) is not None:
+                raise ApiError(
+                    409,
+                    "ELECTRICIAN_ACCOUNT_HAS_BOOKINGS",
+                    "This account owns customer bookings and cannot be deleted. Deactivate the electrician to preserve those records.",
+                )
+            other_grants = list(db.scalars(select(UserRoleGrant.role).where(
+                UserRoleGrant.user_id == user.id, UserRoleGrant.role != "electrician")))
+            if user.role == "electrician" and not other_grants:
+                db.execute(delete(UserRoleGrant).where(UserRoleGrant.user_id == user.id))
+                db.delete(profile)
+                db.delete(user)
+            else:
+                if user.role == "electrician":
+                    user.role = other_grants[0]
+                db.execute(delete(UserRoleGrant).where(
+                    UserRoleGrant.user_id == user.id, UserRoleGrant.role == "electrician"))
+                profile.electrician_id = None
+
+    db.delete(e)
+    db.commit()
+    return {"deleted": electrician_id, "message": "Electrician permanently deleted."}
 
 
 @router.post("/{electrician_id}/unavailability", status_code=201,

@@ -52,6 +52,7 @@ class JobCreate(NaiveTimes):
     priority: Priority = Priority.MEDIUM
     duration_minutes: int = Field(gt=0, le=720)
     required_skills: list[str] = Field(min_length=1, max_length=10)
+    requested_electrician_id: int | None = Field(default=None, gt=0)
     window_start: datetime
     window_end: datetime
     sla_deadline: datetime
@@ -205,6 +206,13 @@ class CustomerAccountIn(BaseModel):
     display_name: str = Field(min_length=2, max_length=120)
 
 
+class RoleSwitchIn(BaseModel):
+    model_config = _STRICT
+    role: str = Field(pattern=r"^(customer|admin|electrician)$")
+    username: str = Field(min_length=3, max_length=60)
+    password: str = Field(min_length=1, max_length=100)
+
+
 class PaymentMethodIn(BaseModel):
     model_config = _STRICT
     label: str = Field(min_length=2, max_length=80)
@@ -217,6 +225,7 @@ class BookingActionIn(BaseModel):
     model_config = _STRICT
     action: str = Field(pattern=r"^(accept|decline|start|complete|cancel|customer_unavailable)$")
     reason: str | None = Field(default=None, max_length=250)
+    electrician_id: int | None = Field(default=None, gt=0)
 
 
 class ManualAssignmentIn(BaseModel):
@@ -233,6 +242,18 @@ class DutyActionIn(BaseModel):
 class PaymentStatusIn(BaseModel):
     model_config = _STRICT
     status: str = Field(pattern=r"^(pending|paid|failed|refunded)$")
+
+
+class CustomerFeedbackIn(BaseModel):
+    model_config = _STRICT
+    rating: int = Field(ge=1, le=5)
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class CustomerComplaintIn(BaseModel):
+    model_config = _STRICT
+    issue_type: str = Field(pattern=r"^(service_not_done|incomplete_service|other_issue)$")
+    description: str | None = Field(default=None, max_length=2000)
 
 
 # ----------------------------------------------------------------------- scheduling

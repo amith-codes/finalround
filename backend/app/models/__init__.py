@@ -274,6 +274,15 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(20), default="dispatcher")
 
 
+class UserRoleGrant(Base):
+    """Roles a trusted administrator has granted to an account for workspace switching."""
+
+    __tablename__ = "user_role_grants"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    role: Mapped[str] = mapped_column(String(20), primary_key=True)
+
+
 class UserProfile(Base):
     """Role-specific identity link; roles are assigned by a trusted administrator."""
 
@@ -368,6 +377,33 @@ class PaymentMethod(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
+class BookingFeedback(Base):
+    __tablename__ = "booking_feedback"
+
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    rating: Mapped[int] = mapped_column(Integer)
+    comment: Mapped[str | None] = mapped_column(Text)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    __table_args__ = (CheckConstraint("rating BETWEEN 1 AND 5", name="ck_booking_feedback_rating"),)
+
+
+class BookingComplaint(Base):
+    __tablename__ = "booking_complaints"
+
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    issue_type: Mapped[str] = mapped_column(String(40))
+    description: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    __table_args__ = (CheckConstraint(
+        "issue_type IN ('service_not_done', 'incomplete_service', 'other_issue')",
+        name="ck_booking_complaint_issue_type",
+    ),)
+
+
 class DutySession(Base):
     __tablename__ = "duty_sessions"
 
@@ -387,6 +423,8 @@ class AvailabilityOverride(Base):
 __all__ = [
     "AvailabilityOverride",
     "Assignment",
+    "BookingComplaint",
+    "BookingFeedback",
     "BookingDetails",
     "BookingDecline",
     "BookingEvent",
@@ -404,6 +442,7 @@ __all__ = [
     "Skill",
     "UnavailablePeriod",
     "User",
+    "UserRoleGrant",
     "UserProfile",
     "PaymentMethod",
     "electrician_skills",

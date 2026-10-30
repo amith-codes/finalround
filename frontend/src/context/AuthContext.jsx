@@ -2,6 +2,15 @@ import { createContext, useCallback, useContext, useEffect, useState } from 'rea
 import { Api, getToken, setToken } from '../services/api'
 
 const AuthContext = createContext(null)
+const ROLE_ALIASES = { dispatcher: 'admin', administrator: 'admin' }
+
+function normalizeAccess(user) {
+  if (!user) return user
+  const role = ROLE_ALIASES[user.role] || user.role
+  const roles = [...new Set((user.roles || [user.role]).map((item) => ROLE_ALIASES[item] || item))]
+  if (role && !roles.includes(role)) roles.push(role)
+  return { ...user, role, roles }
+}
 
 export function AuthProvider({ children }) {
   const [token, setTok] = useState(getToken())
@@ -12,7 +21,18 @@ export function AuthProvider({ children }) {
     const res = await Api.login(username, password)
     setToken(res.access_token)
     setTok(res.access_token)
-    const current = await Api.me()
+    const current = normalizeAccess(await Api.me())
+    setUser(current)
+  }, [])
+
+  // beforeApply runs once the server grants the role but before the workspace re-renders,
+  // so callers can navigate while their component is still mounted.
+  const switchRole = useCallback(async (role, credentials, beforeApply) => {
+    const res = await Api.switchRole(role, credentials)
+    beforeApply?.()
+    setToken(res.access_token)
+    setTok(res.access_token)
+    const current = normalizeAccess(await Api.me())
     setUser(current)
   }, [])
 
@@ -36,7 +56,8 @@ export function AuthProvider({ children }) {
       return () => { active = false }
     }
     setLoading(true)
-    Api.me().then((current) => {
+    Api.me().then((response) => {
+      const current = normalizeAccess(response)
       if (active) setUser(current)
     }).catch(() => {
       if (active) setUser(null)
@@ -46,7 +67,7 @@ export function AuthProvider({ children }) {
     return () => { active = false }
   }, [token])
 
-  return <AuthContext.Provider value={{ token, user, loading, login, logout }}>{children}</AuthContext.Provider>
+  return <AuthContext.Provider value={{ token, user, loading, login, logout, switchRole }}>{children}</AuthContext.Provider>
 }
 
 export const useAuth = () => useContext(AuthContext)

@@ -18,18 +18,123 @@ import argparse
 import random
 from datetime import date, datetime, time, timedelta
 
+from app import config
 from app.database import SessionLocal, reset_db
 from app.models import (
     Assignment,
     Electrician,
+    ElectricianLocality,
     Job,
     ServiceZone,
     Shift,
     Skill,
+    User,
+    UserProfile,
     UnavailablePeriod,
 )
 from app.models.enums import JobStatus
-from app.services.auth import ensure_default_user
+from app.services.auth import ensure_default_user, grant_role, hash_password
+
+LOCALITIES_BY_ZONE = {
+    "CEN": ("Indiranagar", "Jayanagar"),
+    "NTH": ("Hebbal", "Yelahanka"),
+    "STH": ("JP Nagar", "Banashankari"),
+    "EST": ("Whitefield", "Marathahalli"),
+    "WST": ("Rajajinagar", "Vijayanagar"),
+    "OUT": ("Yelahanka", "Airport Road"),
+}
+
+
+def ensure_demo_accounts(db) -> None:
+    """Create local demo identities without replacing any existing account."""
+    from sqlalchemy import select
+
+    def clone_profile(source: Electrician, prefix: str, name: str) -> Electrician:
+        suffix = 1
+        employee_code = f"{prefix}-{suffix:03d}"
+        while db.scalar(select(Electrician.id).where(Electrician.employee_code == employee_code)) is not None:
+            suffix += 1
+            employee_code = f"{prefix}-{suffix:03d}"
+        clone = Electrician(employee_code=employee_code, name=name, home_lat=source.home_lat,
+                            home_lon=source.home_lon, max_overtime_minutes=source.max_overtime_minutes,
+                            active=True)
+        clone.skills = list(source.skills)
+        clone.zones = list(source.zones)
+        clone.shifts = [Shift(day_of_week=shift.day_of_week, start_time=shift.start_time,
+                              end_time=shift.end_time) for shift in source.shifts]
+        clone.service_localities = [ElectricianLocality(locality=area.locality)
+                                    for area in source.service_localities]
+        db.add(clone)
+        db.flush()
+        active_electricians.append(clone)
+        return clone
+
+    customer = db.scalar(select(User).where(User.username == "demo_customer"))
+    if customer is None:
+        customer = User(username="demo_customer", password_hash=hash_password("customer123"), role="customer")
+        db.add(customer)
+        db.flush()
+        grant_role(db, customer, "customer")
+        db.add(UserProfile(user_id=customer.id, display_name="Demo Customer"))
+    elif customer.role == "customer":
+        grant_role(db, customer, "customer")
+
+    active_electricians = list(db.scalars(select(Electrician).where(Electrician.active.is_(True)).order_by(Electrician.id)))
+    for item in active_electricians:
+        if not item.service_localities:
+            item.service_localities = [
+                ElectricianLocality(locality=locality)
+                for locality in sorted({locality for zone in item.zones
+                                        for locality in LOCALITIES_BY_ZONE.get(zone.code, ())})
+            ]
+    linked_electricians = select(UserProfile.electrician_id).where(UserProfile.electrician_id.is_not(None))
+    linked_electrician_ids = set(db.scalars(linked_electricians))
+    electrician = next((item for item in active_electricians if item.id not in linked_electrician_ids), None)
+    electrician_user = db.scalar(select(User).where(User.username == "demo_electrician"))
+    if electrician is None and electrician_user is None and active_electricians:
+        existing_demo = db.scalar(select(Electrician).where(Electrician.employee_code == "DEMO-EL-001"))
+        if existing_demo and existing_demo.active and existing_demo.id not in linked_electrician_ids:
+            electrician = existing_demo
+        else:
+            electrician = clone_profile(active_electricians[0], "DEMO-EL", "Demo Electrician")
+    if electrician is not None:
+        profile = db.scalar(select(UserProfile).where(UserProfile.electrician_id == electrician.id))
+        if electrician_user is None:
+            electrician_user = User(username="demo_electrician", password_hash=hash_password("electrician123"),
+                                    role="electrician")
+            db.add(electrician_user)
+            db.flush()
+            grant_role(db, electrician_user, "electrician")
+            if profile is None:
+                db.add(UserProfile(user_id=electrician_user.id, electrician_id=electrician.id,
+                                   display_name=electrician.name))
+        elif electrician_user.role == "electrician":
+            grant_role(db, electrician_user, "electrician")
+            if profile is None:
+                linked = db.scalar(select(UserProfile).where(UserProfile.user_id == electrician_user.id))
+                if linked is None:
+                    db.add(UserProfile(user_id=electrician_user.id, electrician_id=electrician.id,
+                                       display_name=electrician.name))
+
+    db.flush()
+    # The configured admin may switch into the electrician view as a separate scoped profile.
+    admin = db.scalar(select(User).where(User.username == config.DEFAULT_ADMIN_USERNAME))
+    if admin is not None and active_electricians:
+        admin_profile = db.scalar(select(UserProfile).where(UserProfile.user_id == admin.id))
+        if admin_profile and admin_profile.electrician_id:
+            grant_role(db, admin, "electrician")
+        else:
+            linked_ids = set(db.scalars(select(UserProfile.electrician_id).where(UserProfile.electrician_id.is_not(None))))
+            admin_electrician = next((item for item in active_electricians if item.id not in linked_ids), None)
+            if admin_electrician is None:
+                admin_electrician = clone_profile(active_electricians[0], "ADMIN-EL", "Dispatcher Electrician")
+            if admin_profile is None:
+                db.add(UserProfile(user_id=admin.id, electrician_id=admin_electrician.id,
+                                   display_name="Dispatcher"))
+            else:
+                admin_profile.electrician_id = admin_electrician.id
+            grant_role(db, admin, "electrician")
+    db.commit()
 
 SKILLS = [
     ("residential_wiring", "Residential wiring"),
@@ -149,6 +254,12 @@ def build(db, now: datetime | None = None, rng_seed: int = 42) -> dict:
     db.add_all(techs)
     db.flush()
     by_code = {e.employee_code: e for e in techs}
+    for e in techs:
+        e.service_localities = [
+            ElectricianLocality(locality=locality)
+            for locality in sorted({locality for zone in e.zones
+                                    for locality in LOCALITIES_BY_ZONE.get(zone.code, ())})
+        ]
 
     db.add_all([
         UnavailablePeriod(electrician_id=by_code["EL-005"].id, start=_at(d1, 8), end=_at(d1, 13), reason="Medical appointment"),
@@ -268,6 +379,7 @@ def main() -> None:
     with SessionLocal() as db:
         ensure_default_user(db)
         summary = build(db)
+        ensure_demo_accounts(db)
         print(f"Seeded {summary}")
         if args.schedule:
             from app.services.scheduling_service import execute_run, scheduler_lock

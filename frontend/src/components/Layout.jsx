@@ -4,10 +4,11 @@ import { useAuth } from '../context/AuthContext'
 import { useToast } from '../context/ToastContext'
 import { Api, errorMessage } from '../services/api'
 import LocationPicker from './LocationPicker'
+import RoleSwitcher from './RoleSwitcher'
 
 const NAV_ITEMS = [
-  ['/cart?category=electrician_density', '⚡ Book Electrician'],
   ['/dashboard', '📊 Dashboard'],
+  ['/cart?category=electrician_density', '⚡ Book Electrician'],
   ['/schedule', '🗓️ Schedule'],
   ['/jobs', '📋 Jobs'],
   ['/electricians', '👷 Electricians'],
@@ -15,6 +16,7 @@ const NAV_ITEMS = [
   ['/history', '📜 Run history'],
 ]
 NAV_ITEMS.push(['/customers', 'Customers'])
+const ADMIN_NAV_PATHS = new Set(['/dashboard', '/electricians', '/history'])
 
 export default function Layout() {
   const { logout, user } = useAuth()
@@ -31,8 +33,10 @@ export default function Layout() {
   })
   const [globalSearch, setGlobalSearch] = useState('')
   const navItems = user?.role === 'customer'
-    ? [['/cart?category=electrician_density', 'Book electrician'], ['/bookings', 'Track booking status'], ['/payments', 'Payment methods']]
-    : NAV_ITEMS
+    ? [['/cart?category=electrician_density', 'Book Electrician'], ['/cart', 'Cart']]
+    : user?.role === 'admin'
+      ? NAV_ITEMS.filter(([to]) => ADMIN_NAV_PATHS.has(to))
+      : NAV_ITEMS
 
   const selectLocation = (location) => {
     setCurrentLocation(location)
@@ -108,13 +112,18 @@ export default function Layout() {
           {navItems.map(([to, label]) => {
             const pathOnly = to.split('?')[0]
             const isCart = pathOnly === '/cart'
+            const isCustomer = user?.role === 'customer'
             return (
               <NavLink
                 key={to}
                 to={to}
                 className={({ isActive }) => {
                   const currentPath = window.location.pathname
-                  const active = isActive || (isCart && (currentPath === '/' || currentPath === '/cart'))
+                  const active = isCustomer
+                    ? currentPath === pathOnly && (to.includes('?category=')
+                      ? window.location.search.includes('category=')
+                      : !window.location.search.includes('category='))
+                    : isActive || (isCart && (currentPath === '/' || currentPath === '/cart'))
                   return active ? 'uc-nav-link active' : 'uc-nav-link'
                 }}
               >
@@ -144,6 +153,7 @@ export default function Layout() {
             {busy === 'reoptimize' ? 'Re-optimising…' : 'Re-optimise'}
           </button>
           </>}
+          <RoleSwitcher />
           <span className="muted small">{user?.display_name || user?.username}</span>
           <button className="btn ghost uc-btn-signout" onClick={logout} title="Sign out">
             Sign out

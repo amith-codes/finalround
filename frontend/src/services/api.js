@@ -20,7 +20,7 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (r) => r,
   (err) => {
-    if (err.response?.status === 401 && !err.config.url.includes('/auth/login')) {
+    if (err.response?.status === 401 && !err.config.url.includes('/auth/login') && !err.config.url.includes('/auth/switch-role')) {
       setToken(null)
       window.dispatchEvent(new Event('dispatchgrid:logout'))
     }
@@ -45,6 +45,7 @@ export const Api = {
   login: (username, password) =>
     api.post('/auth/login', new URLSearchParams({ username, password })).then((r) => r.data),
   me: () => api.get('/auth/me').then((r) => r.data),
+  switchRole: (role, credentials) => api.post('/auth/switch-role', { role, ...credentials }).then((r) => r.data),
 
   skills: () => api.get('/skills').then((r) => r.data),
   zones: () => api.get('/zones').then((r) => r.data),
@@ -61,6 +62,7 @@ export const Api = {
   createElectrician: (body) => api.post('/electricians', body).then((r) => r.data),
   updateElectrician: (id, body) => api.put(`/electricians/${id}`, body).then((r) => r.data),
   deleteElectrician: (id) => api.delete(`/electricians/${id}`).then((r) => r.data),
+  removeElectrician: (id) => api.delete(`/electricians/${id}/remove`).then((r) => r.data),
   addUnavailability: (id, body) => api.post(`/electricians/${id}/unavailability`, body).then((r) => r.data),
   deleteUnavailability: (id, pid) => api.delete(`/electricians/${id}/unavailability/${pid}`).then((r) => r.data),
 
@@ -72,17 +74,31 @@ export const Api = {
   jobSchedule: (id) => api.get(`/scheduling/jobs/${id}`).then((r) => r.data),
 
   customerBookings: () => api.get('/portal/customer/bookings').then((r) => r.data),
+  submitCustomerFeedback: (jobId, body) => api.post(`/portal/customer/bookings/${jobId}/feedback`, body).then((r) => r.data),
+  submitCustomerComplaint: (jobId, body) => api.post(`/portal/customer/bookings/${jobId}/complaint`, body).then((r) => r.data),
+  customerLocalities: (zoneCode) => api.get('/portal/customer/localities', { params: { zone_code: zoneCode } }).then((r) => r.data),
+  customerElectricians: (params) => {
+    const query = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (key === 'required_skills') value.forEach((skill) => query.append(key, skill))
+      else if (value !== undefined && value !== null && value !== '') query.set(key, value)
+    })
+    return api.get(`/portal/customer/electricians?${query.toString()}`).then((r) => r.data)
+  },
   cancelCustomerBooking: (id, reason) => api.post(`/portal/customer/bookings/${id}/cancel`, null, { params: { reason } }).then((r) => r.data),
   paymentMethods: () => api.get('/portal/customer/payment-methods').then((r) => r.data),
   addPaymentMethod: (body) => api.post('/portal/customer/payment-methods', body).then((r) => r.data),
   removePaymentMethod: (id) => api.delete(`/portal/customer/payment-methods/${id}`).then((r) => r.data),
   setDefaultPaymentMethod: (id) => api.put(`/portal/customer/payment-methods/${id}/default`).then((r) => r.data),
   electricianBookings: () => api.get('/portal/electrician/bookings').then((r) => r.data),
-  electricianAction: (id, action, reason) => api.post(`/portal/electrician/bookings/${id}/action`, { action, reason }).then((r) => r.data),
+  electricianAction: (id, action, reason, electrician_id) => api.post(`/portal/electrician/bookings/${id}/action`, {
+    action, reason, ...(electrician_id ? { electrician_id } : {}),
+  }).then((r) => r.data),
   electricianDuty: (action) => api.post('/portal/electrician/duty', { action }).then((r) => r.data),
   electricianEarnings: (start, end) => api.get('/portal/electrician/earnings', { params: { start, end } }).then((r) => r.data),
   bookingHistory: (id) => api.get(`/portal/bookings/${id}/history`).then((r) => r.data),
   adminOverview: (params) => api.get('/portal/admin/overview', { params }).then((r) => r.data),
+  adminBookingActivity: (limit = 50) => api.get('/portal/admin/booking-activity', { params: { limit } }).then((r) => r.data),
   adminCustomers: () => api.get('/portal/admin/customers').then((r) => r.data),
   adminEarnings: (start, end) => api.get('/portal/admin/earnings', { params: { start, end } }).then((r) => r.data),
   createCustomer: (body) => api.post('/portal/admin/customers', body).then((r) => r.data),

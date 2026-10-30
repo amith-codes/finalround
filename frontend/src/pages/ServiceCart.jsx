@@ -11,6 +11,7 @@ export const UC_SERVICES = [
   // Switch & Socket
   {
     id: 'uc_sw_replace',
+    image: '/images/switch-socket.jpg',
     category: 'switch_socket',
     categoryName: 'Switch & Socket',
     title: 'Switch / Socket Replacement & Repair',
@@ -38,6 +39,7 @@ export const UC_SERVICES = [
   },
   {
     id: 'uc_sw_board_inst',
+    image: '/images/switchboard-installation.jpg',
     category: 'switch_socket',
     categoryName: 'Switch & Socket',
     title: 'Switchboard Installation (Up to 6 modules)',
@@ -60,6 +62,7 @@ export const UC_SERVICES = [
   },
   {
     id: 'uc_ac_power_point',
+    image: '/images/ac-heavy-appliance-point.jpg',
     category: 'switch_socket',
     categoryName: 'Switch & Socket',
     title: 'AC / Heavy Appliance Power Point (16A / 25A)',
@@ -84,6 +87,7 @@ export const UC_SERVICES = [
   // Fans & Regulators
   {
     id: 'uc_fan_repair',
+    image: '/images/ceiling-fan-repair-regreasing.jpg',
     category: 'fan',
     categoryName: 'Fan & Regulators',
     title: 'Ceiling Fan Repair & Regreasing',
@@ -106,6 +110,7 @@ export const UC_SERVICES = [
   },
   {
     id: 'uc_fan_installation',
+    image: '/images/ceiling-fan-installation-replacement.jpg',
     category: 'fan',
     categoryName: 'Fan & Regulators',
     title: 'Ceiling Fan Installation / Replacement',
@@ -128,6 +133,7 @@ export const UC_SERVICES = [
   },
   {
     id: 'uc_bldc_fan',
+    image: '/images/smart-bldc-fan-installation.jpg',
     category: 'fan',
     categoryName: 'Fan & Regulators',
     title: 'Smart BLDC Fan Installation & Remote Pairing',
@@ -150,6 +156,7 @@ export const UC_SERVICES = [
   },
   {
     id: 'uc_exhaust_fan',
+    image: '/images/exhaust-fan-installation-replacement.jpg',
     category: 'fan',
     categoryName: 'Fan & Regulators',
     title: 'Exhaust Fan Installation / Replacement',
@@ -555,10 +562,15 @@ export default function ServiceCart() {
   const [skills, setSkills] = useState([])
   const [busyBooking, setBusyBooking] = useState(false)
   const [confirmedBooking, setConfirmedBooking] = useState(null)
+  const [availableElectricians, setAvailableElectricians] = useState(null)
+  const [serviceLocalities, setServiceLocalities] = useState([])
+  const [selectedElectricianId, setSelectedElectricianId] = useState('')
+  const [candidateError, setCandidateError] = useState(null)
+  const [loadingCandidates, setLoadingCandidates] = useState(false)
 
   useEffect(() => {
-    if (!serviceLocality && location) setServiceLocality(location.city || location.district || '')
-  }, [location, serviceLocality])
+    setServiceLocality(location ? (location.city || location.district || '') : '')
+  }, [location])
 
   // Load zones & skills
   useEffect(() => {
@@ -587,10 +599,62 @@ export default function ServiceCart() {
   }, [cart])
 
   const cartItemCount = cartEntries.reduce((sum, e) => sum + e.qty, 0)
+  const bookingSkills = useMemo(() => [...new Set(cartEntries.flatMap(({ item }) => item.skills))], [cartEntries])
+  const bookingDuration = useMemo(() => Math.min(360, Math.max(30,
+    cartEntries.reduce((sum, { item, qty }) => sum + (item.duration_minutes || 30) * qty, 0))), [cartEntries])
+  const bookingWindow = useMemo(() => {
+    const date = new Date()
+    if (selectedDate === 'tomorrow') date.setDate(date.getDate() + 1)
+    else if (selectedDate === 'day_after') date.setDate(date.getDate() + 2)
+    const slot = TIME_SLOTS.find((item) => item.id === selectedSlot) || TIME_SLOTS[0]
+    const start = new Date(date); start.setHours(Math.floor(slot.startH), (slot.startH % 1) * 60, 0, 0)
+    const end = new Date(date); end.setHours(Math.floor(slot.endH), (slot.endH % 1) * 60, 0, 0)
+    return { start: fromLocalInput(toLocalInput(start)), end: fromLocalInput(toLocalInput(end)), slot }
+  }, [selectedDate, selectedSlot])
   const itemSubtotal = cartEntries.reduce((sum, e) => sum + e.total, 0)
   const visitingFee = itemSubtotal >= 399 || itemSubtotal === 0 ? 0 : 49
   const discountAmount = appliedCoupon === 'DISPATCH10' ? Math.round(itemSubtotal * 0.1) : appliedCoupon === 'FIRST100' ? Math.min(100, itemSubtotal) : 0
   const totalAmount = Math.max(0, itemSubtotal + visitingFee - discountAmount)
+
+  useEffect(() => {
+    if (user?.role !== 'customer' || !selectedZone) {
+      setServiceLocalities([])
+      return undefined
+    }
+    let current = true
+    Api.customerLocalities(selectedZone).then((items) => {
+      if (current) setServiceLocalities(items)
+    }).catch(() => {
+      if (current) setServiceLocalities([])
+    })
+    return () => { current = false }
+  }, [user?.role, selectedZone])
+
+  useEffect(() => {
+    if (user?.role !== 'customer' || cartItemCount === 0 || !serviceLocality.trim()) {
+      setAvailableElectricians(null)
+      setSelectedElectricianId('')
+      setCandidateError(null)
+      setLoadingCandidates(false)
+      return undefined
+    }
+    let current = true
+    setLoadingCandidates(true)
+    setCandidateError(null)
+    setAvailableElectricians(null)
+    setSelectedElectricianId('')
+    Api.customerElectricians({
+      window_start: bookingWindow.start, window_end: bookingWindow.end, duration_minutes: bookingDuration,
+      locality: serviceLocality.trim(),
+    }).then((candidates) => {
+      if (current) setAvailableElectricians(candidates)
+    }).catch((error) => {
+      if (current) setCandidateError(errorMessage(error))
+    }).finally(() => {
+      if (current) setLoadingCandidates(false)
+    })
+    return () => { current = false }
+  }, [user?.role, cartItemCount, bookingDuration, bookingWindow, serviceLocality])
 
   // Cart operations
   const updateQty = (id, delta) => {
@@ -640,6 +704,10 @@ export default function ServiceCart() {
     }
     if (!location?.district || !location?.state) {
       toast('Select your district and state in the location selector', 'error')
+      return
+    }
+    if (user?.role === 'customer' && !selectedElectricianId) {
+      toast('Choose an available electrician for this locality and time', 'error')
       return
     }
 
@@ -702,6 +770,7 @@ export default function ServiceCart() {
         priority: priority,
         duration_minutes: durationMinutes,
         required_skills: requiredSkills.length > 0 ? requiredSkills : ['residential_wiring'],
+        ...(user?.role === 'customer' ? { requested_electrician_id: Number(selectedElectricianId) } : {}),
         lat: Number(lat.toFixed(6)),
         lon: Number(lon.toFixed(6)),
         window_start: fromLocalInput(toLocalInput(winStart)),
@@ -711,7 +780,9 @@ export default function ServiceCart() {
 
       // 3. Create the job in DispatchGrid
       const createdJob = await Api.createJob(payload)
-      toast(`Booking ${createdJob.job_number} created successfully!`, 'success')
+      toast(user?.role === 'customer'
+        ? `Request ${createdJob.job_number} sent to ${createdJob.assignment?.electrician_name || 'the electrician'}`
+        : `Booking ${createdJob.job_number} created successfully!`, 'success')
 
       // Customer bookings dispatch automatically on the server; dispatcher bookings use the existing run action.
       const run = user?.role === 'customer' ? null : await Api.runScheduling()
@@ -743,7 +814,23 @@ export default function ServiceCart() {
 
       // Clear cart
       setCart({})
+      setSelectedElectricianId('')
     } catch (e) {
+      if (user?.role === 'customer' && e?.response?.data?.error?.code === 'ELECTRICIAN_NO_LONGER_AVAILABLE') {
+        setSelectedElectricianId('')
+        setLoadingCandidates(true)
+        try {
+          const candidates = await Api.customerElectricians({
+            window_start: bookingWindow.start, window_end: bookingWindow.end, duration_minutes: bookingDuration,
+          })
+          setAvailableElectricians(candidates)
+          setCandidateError(null)
+        } catch (refreshError) {
+          setCandidateError(errorMessage(refreshError))
+        } finally {
+          setLoadingCandidates(false)
+        }
+      }
       toast(errorMessage(e), 'error')
     } finally {
       setBusyBooking(false)
@@ -880,10 +967,10 @@ export default function ServiceCart() {
 
                     <div className="service-action-column">
                       <div
-                        className="service-icon-box service-sprite service-plan-image"
-                        style={{ backgroundPosition: spritePosition(serviceCategory) }}
+                        className={`service-icon-box service-plan-image${svc.image ? ' service-photo' : ' service-sprite'}`}
+                        style={svc.image ? { backgroundImage: `url("${svc.image}")` } : { backgroundPosition: spritePosition(serviceCategory) }}
                         role="img"
-                        aria-label={`${serviceCategory.name} service`}
+                        aria-label={svc.title}
                       />
 
                       {/* Add button or Quantity Stepper */}
@@ -1083,7 +1170,11 @@ export default function ServiceCart() {
                       value={serviceLocality}
                       onChange={(e) => setServiceLocality(e.target.value)}
                       className="uc-input"
+                      list="dispatcher-service-localities"
                     />
+                    <datalist id="dispatcher-service-localities">
+                      {serviceLocalities.map((locality) => <option key={locality} value={locality} />)}
+                    </datalist>
                     <input
                       type="text"
                       placeholder="Your Name"
@@ -1106,6 +1197,36 @@ export default function ServiceCart() {
                       className="uc-input"
                     />
                   </div>
+
+                  {user?.role === 'customer' && <section className="booking-electrician-picker" aria-labelledby="electrician-choice-heading">
+                    <div className="section-head">
+                      <span className="sec-icon">👷</span>
+                      <h4 id="electrician-choice-heading">Choose your electrician</h4>
+                    </div>
+                    <p className="field-hint">Showing active electricians registered for {serviceLocality.trim() || 'your selected locality'} with no overlapping booking for {bookingWindow.slot.label}. They will receive your request and can accept or decline it.</p>
+                    {loadingCandidates && <div className="electrician-choice-state">Checking local availability…</div>}
+                    {candidateError && <div className="electrician-choice-state error">{candidateError}</div>}
+                    {!loadingCandidates && !candidateError && !serviceLocality.trim() &&
+                      <div className="electrician-choice-state">Enter a service locality to see electricians who serve it.</div>}
+                    {!loadingCandidates && !candidateError && availableElectricians?.length === 0 &&
+                      <div className="electrician-choice-state">No available electricians are registered for {serviceLocality.trim()} at this time. Try another locality or appointment time.</div>}
+                    {!loadingCandidates && availableElectricians?.length > 0 && <div className="booking-electrician-options">
+                      {availableElectricians.map((electrician) => {
+                        const chosen = String(electrician.id) === String(selectedElectricianId)
+                        return <button key={electrician.id} type="button" aria-pressed={chosen}
+                          className={`booking-electrician-option${chosen ? ' selected' : ''}`}
+                          onClick={() => setSelectedElectricianId(String(electrician.id))}>
+                          <span className="electrician-choice-avatar" aria-hidden="true">👷</span>
+                          <span className="booking-electrician-copy">
+                            <b>{electrician.name}</b>
+                            <small>Registered service area: {electrician.service_area || 'Not listed'}</small>
+                            <small>{electrician.availability} · {fmtTime(electrician.available_from)}</small>
+                          </span>
+                          <span className="booking-electrician-check" aria-hidden="true">{chosen ? '✓' : '○'}</span>
+                        </button>
+                      })}
+                    </div>}
+                  </section>}
 
                   <div className="priority-toggle-row">
                     <label className="prio-opt">
@@ -1255,10 +1376,10 @@ export default function ServiceCart() {
           <div className="uc-booking-success">
             <div className="success-header">
               <div className="success-badge-icon">✓</div>
-              <h2>Electrician Dispatched &amp; Scheduled!</h2>
-              <p className="success-sub">
-                Your service has been confirmed with Dispatcher.
-              </p>
+              <h2>{user?.role === 'customer' ? 'Electrician request sent' : 'Electrician Dispatched & Scheduled!'}</h2>
+              <p className="success-sub">{user?.role === 'customer'
+                ? 'Your selected electrician will accept or decline this request. Track updates in your bookings.'
+                : 'Your service has been confirmed with Dispatcher.'}</p>
             </div>
 
             <div className="uc-confirmed-card">
@@ -1279,7 +1400,7 @@ export default function ServiceCart() {
                 <span className="val">{confirmedBooking.date} • {confirmedBooking.slot}</span>
               </div>
               <div className="confirm-row">
-                <span className="lbl">Total Paid</span>
+                <span className="lbl">Booking total</span>
                 <span className="val price">₹{confirmedBooking.totalAmount}</span>
               </div>
             </div>
@@ -1289,11 +1410,11 @@ export default function ServiceCart() {
               <div className="assigned-electrician-box">
                 <div className="electrician-avatar">👷</div>
                 <div className="electrician-details">
-                  <div className="badge-assigned">Assigned Electrician</div>
+                  <div className="badge-assigned">{user?.role === 'customer' ? 'Request sent to' : 'Assigned Electrician'}</div>
                   <h3>{confirmedBooking.assignment.electrician_name}</h3>
-                  <p className="eta-text">
-                    Scheduled Arrival: <b>{fmtDateTime(confirmedBooking.assignment.start)}</b> to <b>{fmtTime(confirmedBooking.assignment.end)}</b>
-                  </p>
+                  {user?.role === 'customer'
+                    ? <p className="eta-text">Awaiting response · Requested slot <b>{fmtDateTime(confirmedBooking.assignment.start)}</b></p>
+                    : <p className="eta-text">Scheduled Arrival: <b>{fmtDateTime(confirmedBooking.assignment.start)}</b> to <b>{fmtTime(confirmedBooking.assignment.end)}</b></p>}
                   {confirmedBooking.explanation && (
                     <p className="small muted">{confirmedBooking.explanation}</p>
                   )}
@@ -1310,20 +1431,12 @@ export default function ServiceCart() {
             )}
 
             <div className="success-actions">
-              <Link
-                to="/schedule"
-                className="btn primary"
-                onClick={() => setConfirmedBooking(null)}
-              >
-                View Live Schedule Timeline ➔
-              </Link>
-              <Link
-                to="/jobs"
-                className="btn"
-                onClick={() => setConfirmedBooking(null)}
-              >
-                View in Jobs Roster
-              </Link>
+              {user?.role === 'customer' ? <Link to="/bookings" className="btn primary" onClick={() => setConfirmedBooking(null)}>
+                Track booking request ➔
+              </Link> : <>
+                <Link to="/schedule" className="btn primary" onClick={() => setConfirmedBooking(null)}>View Live Schedule Timeline ➔</Link>
+                <Link to="/jobs" className="btn" onClick={() => setConfirmedBooking(null)}>View in Jobs Roster</Link>
+              </>}
               <button
                 type="button"
                 className="btn ghost"

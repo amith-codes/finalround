@@ -1,42 +1,78 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useToast } from '../context/ToastContext'
 import { Api, errorMessage } from '../services/api'
-import { fmtDateTime, humanize } from '../services/format'
-import { Card, Empty, ErrorBox, Loading } from '../components/ui'
+import { fmtWindow } from '../services/format'
+import { Card, Empty, ErrorBox, Loading, ReasonDialog } from '../components/ui'
 
-const localDay = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-const monthStart = () => { const d = new Date(); d.setDate(1); return localDay(d) }
-
-function BookingCard({ job, offer, action }) {
+function BookingRequest({ job, electrician, onAction }) {
   const [busy, setBusy] = useState(false)
-  const run = async (kind) => {
-    let reason = null
-    if (['decline', 'cancel', 'customer_unavailable'].includes(kind)) {
-      reason = window.prompt(kind === 'customer_unavailable' ? 'Why was the customer unavailable?' : `${humanize(kind)} reason:`)
-      if (reason === null) return
-      if (!reason.trim()) { window.alert('Enter a short reason to continue.'); return }
-    }
+  const [askingToDecline, setAskingToDecline] = useState(false)
+
+  const act = async (action, reason = null) => {
     setBusy(true)
-    try { await action(job.id, kind, reason); } catch { /* The dashboard shows the action error toast. */ }
-    finally { setBusy(false) }
+    try {
+      await onAction(electrician.id, job.id, action, reason)
+      setAskingToDecline(false)
+    } catch {
+      // The dashboard reports action errors in a toast.
+    } finally {
+      setBusy(false)
+    }
   }
+
+  const pending = job.booking_stage === 'awaiting_response'
+  const action = pending ? 'accept' : job.status === 'assigned' ? 'start' : job.status === 'in_progress' ? 'complete' : null
+  const actionLabel = action === 'accept' ? 'Accept booking'
+    : action === 'start' ? 'In progress'
+      : action === 'complete' ? 'Complete service' : null
+  const statusLabel = pending ? 'Awaiting response'
+    : job.status === 'assigned' ? 'Accepted'
+      : job.status === 'in_progress' ? 'In progress' : job.status
+
   return <article className="electrician-booking-card">
-    <div className="electrician-booking-title"><div><span className="muted small">{job.job_number} · {job.service_locality || job.district || job.zone_name}</span><h3>{job.title}</h3></div>
-      <span className={`badge st-${job.status}`}>{humanize(job.status)}</span></div>
-    <div className="customer-booking-grid">
-      <div><small>Appointment</small><b>{fmtDateTime(job.window_start)}</b></div>
-      <div><small>Customer</small><b>{job.customer_name || 'Customer'}</b></div>
-      <div><small>Contact</small><b>{job.customer_phone || 'Not provided'}</b></div>
-      <div><small>Location</small><b>{job.address || job.zone_name}</b></div>
-      <div><small>Skills</small><b>{job.required_skills.map(humanize).join(', ')}</b></div>
+    <div className="electrician-booking-title">
+      <div>
+        <span className="muted small">{job.job_number}</span>
+        <h3>{job.title}</h3>
+      </div>
+      <span className={`badge status-${job.status === 'in_progress' ? 'in_progress' : pending ? 'pending' : 'assigned'}`}>{statusLabel}</span>
     </div>
-    <div className="row gap wrap customer-booking-actions">
-      {offer ? <><button className="btn primary small" disabled={busy} onClick={() => run('accept')}>Accept booking</button><button className="btn small" disabled={busy} onClick={() => run('decline')}>Decline</button></> : <>
-        {job.status === 'assigned' && job.booking_action !== 'accepted' && <button className="btn primary small" disabled={busy} onClick={() => run('accept')}>Accept</button>}
-        {job.status === 'assigned' && <button className="btn small" disabled={busy} onClick={() => run('start')}>Start work</button>}
-        {job.status === 'in_progress' && <button className="btn primary small" disabled={busy} onClick={() => run('complete')}>Mark completed</button>}
-        {job.status === 'assigned' && <><button className="btn small" disabled={busy} onClick={() => run('customer_unavailable')}>Customer unavailable</button><button className="btn danger small" disabled={busy} onClick={() => run('cancel')}>Cancel assignment</button></>}
-      </>}
+    <p className="muted small"><b>Assigned to {electrician.name}</b> · {job.customer_name || 'A customer'} requested this service.</p>
+    <div className="customer-booking-grid">
+      <div><small>Customer</small><b>{job.customer_name || 'Customer'}</b></div>
+      <div><small>Appointment</small><b>{fmtWindow(job.window_start, job.window_end)}</b></div>
+      <div><small>Service location</small><b>{[job.service_locality, job.district, job.state].filter(Boolean).join(', ') || job.zone_name || 'See address'}</b></div>
+      <div><small>Service address</small><b>{job.address || 'Address provided with booking'}</b></div>
+    </div>
+    {action && <div className="row gap wrap customer-booking-actions">
+      <button className="btn primary small" disabled={busy} onClick={() => act(action)}>
+        {busy ? 'Updating…' : actionLabel}
+      </button>
+      {pending && <button className="btn danger small" disabled={busy} onClick={() => setAskingToDecline(true)}>
+        Decline
+      </button>}
+    </div>}
+    {askingToDecline && <ReasonDialog
+      title={`Decline booking · ${job.job_number}`}
+      prompt="Why are you declining this booking?"
+      confirmLabel="Decline booking"
+      busy={busy}
+      onClose={() => setAskingToDecline(false)}
+      onSubmit={(reason) => act('decline', reason)}
+    />}
+  </article>
+}
+
+function CompletedService({ job }) {
+  return <article className="electrician-booking-card">
+    <div className="electrician-booking-title">
+      <div><span className="muted small">{job.job_number}</span><h3>{job.title}</h3></div>
+      <span className="badge status-completed">Completed</span>
+    </div>
+    <div className="customer-booking-grid">
+      <div><small>Customer</small><b>{job.customer_name || 'Customer'}</b></div>
+      <div><small>Completed</small><b>{job.actual_end ? new Date(job.actual_end).toLocaleString() : 'Completion time unavailable'}</b></div>
+      <div><small>Service locality</small><b>{[job.service_locality, job.district, job.state].filter(Boolean).join(', ') || job.zone_name || 'See address'}</b></div>
     </div>
   </article>
 }
@@ -44,55 +80,94 @@ function BookingCard({ job, offer, action }) {
 export default function ElectricianPortal() {
   const toast = useToast()
   const [home, setHome] = useState(null)
-  const [earnings, setEarnings] = useState(null)
   const [error, setError] = useState(null)
-  const [period, setPeriod] = useState({ start: monthStart(), end: localDay(new Date()) })
-  const [busy, setBusy] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState({})
+  const seenRequestIds = useRef(null)
+
   const load = useCallback(async () => {
     try {
-      const [bookings, totals] = await Promise.all([Api.electricianBookings(), Api.electricianEarnings(period.start, period.end)])
-      setHome(bookings); setEarnings(totals); setError(null)
-    } catch (e) { setError(errorMessage(e)) }
-  }, [period])
-  useEffect(() => { load(); const timer = setInterval(load, 30000); return () => clearInterval(timer) }, [load])
+      setHome(await Api.electricianBookings())
+      setError(null)
+    } catch (e) {
+      setError(errorMessage(e))
+    }
+  }, [])
 
-  const act = async (id, action, reason) => {
-    try { await Api.electricianAction(id, action, reason); toast(`Booking ${action.replaceAll('_', ' ')}`, 'success'); await load() }
-    catch (e) { toast(errorMessage(e), 'error'); throw e }
+  useEffect(() => {
+    load()
+    const timer = setInterval(load, 5000)
+    return () => clearInterval(timer)
+  }, [load])
+
+  const panels = useMemo(() => home?.electricians || [], [home])
+  const pendingRequests = useMemo(
+    () => panels.flatMap((panel) => panel.assigned.map((job) => ({ job, electrician: panel.electrician }))),
+    [panels],
+  )
+
+  useEffect(() => {
+    if (!home) return
+    const currentIds = new Set(pendingRequests.map(({ job, electrician }) => `${electrician.id}:${job.id}`))
+    const previousIds = seenRequestIds.current
+    const newRequests = pendingRequests.filter(({ job, electrician }) => !previousIds?.has(`${electrician.id}:${job.id}`))
+    for (const { job, electrician } of newRequests) {
+      toast(`${job.customer_name || 'A customer'} booked ${job.title} with ${electrician.name}`, 'info')
+    }
+    seenRequestIds.current = currentIds
+  }, [home, pendingRequests, toast])
+
+  const act = async (electricianId, jobId, action, reason) => {
+    try {
+      await Api.electricianAction(jobId, action, reason, home?.all_electricians ? electricianId : undefined)
+      const messages = {
+        accept: 'Booking accepted', decline: 'Booking declined',
+        start: 'Booking marked in progress', complete: 'Service completed',
+      }
+      toast(messages[action] || 'Booking updated', 'success')
+      await load()
+    } catch (e) {
+      toast(errorMessage(e), 'error')
+      throw e
+    }
   }
-  const duty = async (action) => {
-    setBusy(true)
-    try { const result = await Api.electricianDuty(action); toast(action.replace('_', ' '), 'success'); if (result.released_bookings) toast(`${result.released_bookings} booking(s) returned to dispatch`, 'info'); await load() }
-    catch (e) { toast(errorMessage(e), 'error') }
-    finally { setBusy(false) }
-  }
-  const shiftText = useMemo(() => home?.electrician?.shifts?.map((shift) => `${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][shift.day_of_week]} ${shift.start_time}–${shift.end_time}`).join(' · ') || 'No weekly shifts listed', [home])
-  if (!home && !error) return <Loading what="Loading electrician dashboard" />
+
+  if (!home && !error) return <Loading what="Loading electrician booking requests" />
+
   return <div className="stack electrician-portal">
-    <div className="page-head"><div><h1>Electrician dashboard</h1><p className="muted">Your assignments, service areas and time on duty.</p></div><button className="btn" onClick={load}>Refresh</button></div>
-    <ErrorBox error={error} />
-    {home && <>
-      <div className="stats electrician-stats">
-        <div className="stat"><span>Availability</span><b>{home.availability.is_available ? home.electrician.current_status.replaceAll('_', ' ') : 'unavailable'}</b></div>
-        <div className="stat"><span>Duty time · selected period</span><b>{Math.floor((earnings?.duty_minutes || 0) / 60)}h {(earnings?.duty_minutes || 0) % 60}m</b></div>
-        <div className="stat"><span>Gross earnings · completed jobs</span><b>₹{Number(earnings?.gross_earnings || 0).toFixed(2)}</b></div>
+    <div className="page-head">
+      <div>
+        <h1>Electrician dashboard</h1>
+        <p className="muted">Customer requests appear under the electrician selected for the booking.</p>
       </div>
-      <Card title="Duty and availability" actions={<span className={`badge avail-${home.electrician.current_status}`}>{humanize(home.electrician.current_status)}</span>}>
-        <div className="duty-row"><div><b>{home.electrician.name}</b><small>{home.electrician.employee_code} · Service localities: {home.electrician.localities.join(', ') || 'None configured'}</small><small>Shifts: {shiftText}</small><small>Duty session: {home.on_duty ? 'Clocked in' : 'Clocked out'}</small></div>
-          <div className="row gap wrap"><button className="btn small" disabled={busy || home.on_duty} onClick={() => duty('clock_in')}>Clock in</button><button className="btn small" disabled={busy || !home.on_duty} onClick={() => duty('clock_out')}>Clock out</button><button className={`btn small ${home.availability.is_available ? 'danger' : 'primary'}`} disabled={busy} onClick={() => duty(home.availability.is_available ? 'unavailable' : 'available')}>{home.availability.is_available ? 'Set unavailable' : 'Set available'}</button></div>
-        </div>
-      </Card>
-      <Card title={`New bookings (${home.offers.length})`}>
-        {!home.offers.length ? <Empty>No local bookings are waiting for your response.</Empty> : <div className="electrician-booking-list">{home.offers.map((job) => <BookingCard key={job.id} job={job} offer action={act} />)}</div>}
-      </Card>
-      <Card title={`Assigned and active (${home.assigned.length})`}>
-        {!home.assigned.length ? <Empty>No assigned bookings.</Empty> : <div className="electrician-booking-list">{home.assigned.map((job) => <BookingCard key={job.id} job={job} action={act} />)}</div>}
-      </Card>
-      <Card title="Earnings by completed booking" actions={<span className="muted small">Gross booking value · INR</span>}>
-        <div className="period-filter"><label>From<input type="date" value={period.start} onChange={(e) => setPeriod({ ...period, start: e.target.value })} /></label><label>To<input type="date" value={period.end} onChange={(e) => setPeriod({ ...period, end: e.target.value })} /></label></div>
-        {!earnings?.bookings.length ? <Empty>No completed bookings in this period.</Empty> : <div className="table-wrap"><table className="table"><thead><tr><th>Booking</th><th>Completed</th><th>Service</th><th>Gross value</th></tr></thead><tbody>{earnings.bookings.map((job) => <tr key={job.id}><td><b>{job.job_number}</b></td><td>{fmtDateTime(job.actual_end)}</td><td>{job.title}</td><td>₹{Number(job.booking_amount || 0).toFixed(2)}</td></tr>)}</tbody></table></div>}
-        <p className="muted small">Payout splits are not configured; totals use the booking service amount.</p>
-      </Card>
-    </>}
+      <button className="btn" onClick={load}>Refresh</button>
+    </div>
+    <ErrorBox error={error} />
+    {home && (panels.length === 0
+      ? <Card><Empty>No active electricians are available.</Empty></Card>
+      : <div className="stack">
+        {panels.map((panel) => <Card
+          key={panel.electrician.id}
+          title={`Bookings for ${panel.electrician.name}${panel.electrician.phone ? ` · ${panel.electrician.phone}` : ' · Phone not listed'}`}
+          actions={<button
+            className="btn small"
+            type="button"
+            aria-expanded={!!historyOpen[panel.electrician.id]}
+            onClick={() => setHistoryOpen((open) => ({ ...open, [panel.electrician.id]: !open[panel.electrician.id] }))}
+          >History ({panel.completed_count ?? panel.history?.length ?? 0})</button>}
+        >
+          {!panel.assigned.length && !panel.active?.length
+            ? <Empty>No current customer bookings for {panel.electrician.name}.</Empty>
+            : <div className="electrician-booking-list">
+              {panel.assigned.map((job) => <BookingRequest key={job.id} job={job} electrician={panel.electrician} onAction={act} />)}
+              {(panel.active || []).map((job) => <BookingRequest key={job.id} job={job} electrician={panel.electrician} onAction={act} />)}
+            </div>}
+          {historyOpen[panel.electrician.id] && <div className="booking-audit">
+            <h3>Completed services ({panel.completed_count ?? panel.history?.length ?? 0})</h3>
+            {panel.history?.length
+              ? <div className="electrician-booking-list">{panel.history.map((job) => <CompletedService key={job.id} job={job} />)}</div>
+              : <Empty>No completed services yet.</Empty>}
+          </div>}
+        </Card>)}
+      </div>)}
   </div>
 }

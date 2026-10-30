@@ -66,6 +66,13 @@ export default function Login() {
 
         </form>
 
+        <div className="uc-demo-accounts" aria-label="Local demo login credentials">
+          <strong>Local demo logins</strong>
+          <span><b>Admin:</b> dispatcher / dispatch123</span>
+          <span><b>Customer:</b> demo_customer / customer123</span>
+          <span><b>Electrician:</b> demo_electrician / electrician123</span>
+        </div>
+
         <div className="uc-login-trust-footer">
           <span>🛡️ 30-Day Guarantee</span>
           <span>•</span>

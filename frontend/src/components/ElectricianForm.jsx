@@ -14,14 +14,16 @@ export default function ElectricianForm({ electrician, skills, zones, onSubmit }
     name: e?.name || '', phone: e?.phone || '', email: e?.email || '',
     home_lat: e?.home_lat ?? 12.9716, home_lon: e?.home_lon ?? 77.5946,
     max_overtime_minutes: e?.max_overtime_minutes ?? 0,
-    skills: e?.skills || [], zones: e?.zones || [],
+    // Keep existing dispatch qualifications when editing. New profiles inherit
+    // the available values because these assignments are no longer configured here.
+    skills: e?.skills || skills.map((skill) => skill.code),
+    zones: e?.zones || zones.map((zone) => zone.code),
   })
   const [localitiesText, setLocalitiesText] = useState((e?.localities || []).join(', '))
   const [account, setAccount] = useState({ username: '', initial_password: '' })
   const [shifts, setShifts] = useState(initialShifts(e?.shifts))
   const [busy, setBusy] = useState(false)
   const set = (k) => (ev) => setF({ ...f, [k]: ev.target.value })
-  const toggle = (k, code) => setF({ ...f, [k]: f[k].includes(code) ? f[k].filter((x) => x !== code) : [...f[k], code] })
   const setShift = (d, patch) => setShifts(shifts.map((s, i) => (i === d ? { ...s, ...patch } : s)))
 
   const submit = async (ev) => {
@@ -56,26 +58,6 @@ export default function ElectricianForm({ electrician, skills, zones, onSubmit }
       <label>Home base longitude<input required type="number" step="any" value={f.home_lon} onChange={set('home_lon')} /></label>
       <label>Max overtime (min/day)<input type="number" min={0} max={240} step={15} value={f.max_overtime_minutes} onChange={set('max_overtime_minutes')} /></label>
       <span />
-      <fieldset className="span2">
-        <legend>Skills</legend>
-        <div className="checks">
-          {skills.map((s) => (
-            <label key={s.code} className="check">
-              <input type="checkbox" checked={f.skills.includes(s.code)} onChange={() => toggle('skills', s.code)} />{s.name}
-            </label>
-          ))}
-        </div>
-      </fieldset>
-      <fieldset className="span2">
-        <legend>Service zones</legend>
-        <div className="checks">
-          {zones.map((z) => (
-            <label key={z.code} className="check">
-              <input type="checkbox" checked={f.zones.includes(z.code)} onChange={() => toggle('zones', z.code)} />{z.name}
-            </label>
-          ))}
-        </div>
-      </fieldset>
       <label className="span2">Service localities<input placeholder="Hebbal, Mysuru, JP Nagar" value={localitiesText} onChange={(event) => setLocalitiesText(event.target.value)} /><small className="field-hint">Use the same locality names customers enter when booking. Automatic dispatch requires an exact locality match.</small></label>
       <fieldset className="span2">
         <legend>Weekly shifts</legend>
@@ -90,7 +72,7 @@ export default function ElectricianForm({ electrician, skills, zones, onSubmit }
         </div>
       </fieldset>
       <div className="span2 row end">
-        <button className="btn primary" disabled={busy || !f.zones.length}>{busy ? 'Saving…' : 'Save electrician'}</button>
+        <button className="btn primary" disabled={busy}>{busy ? 'Saving…' : 'Save electrician'}</button>
       </div>
     </form>
   )

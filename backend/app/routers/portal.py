@@ -7,12 +7,18 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.database import get_db
 from app.models import (
-    Assignment, AvailabilityOverride, BookingDecline, BookingDetails, BookingEvent,
-    BookingOwner, DutySession, Electrician, Job, ManualDispatchOverride, PaymentMethod, User, UserProfile,
+    Assignment, AvailabilityOverride, BookingComplaint, BookingDecline, BookingDetails,
+    BookingEvent, BookingFeedback,
+    BookingOwner, DutySession, Electrician, Job, ManualDispatchOverride, PaymentMethod, ServiceZone, User, UserProfile,
 )
 from app.models.enums import JobStatus, RunMode
-from app.schemas import BookingActionIn, CustomerAccountIn, DutyActionIn, ManualAssignmentIn, PaymentMethodIn, PaymentStatusIn
-from app.services.auth import hash_password, require_role
+from app.schemas import (
+    BookingActionIn, CustomerAccountIn, CustomerComplaintIn, CustomerFeedbackIn, DutyActionIn,
+    ManualAssignmentIn, PaymentMethodIn, PaymentStatusIn,
+)
+from app.services.auth import active_role, authorized_roles, grant_role, hash_password, require_role
+from app.services.booking_availability import available_slot
+from app.services.electrician_service import serves_locality
 from app.services.electrician_service import get_electrician
 from app.services.errors import ApiError, not_found
 from app.services.job_service import get_job, transition
@@ -21,6 +27,13 @@ from app.services.scheduling_service import execute_run, scheduler_lock
 from app.services.serializers import electrician_dict, electrician_status, job_dict
 
 router = APIRouter(prefix="/api/portal", tags=["role portals"])
+
+# Electrician actions that release a booking back to dispatch; each one must carry a reason.
+RELEASE_ACTIONS = {"decline", "cancel", "customer_unavailable"}
+# Booking events shown in the admin activity feed (electrician declines and all cancellations).
+ACTIVITY_ACTIONS = {"declined", "decline", "cancel", "customer_unavailable", "availability_cancelled_assignment",
+                    "cancelled_by_customer", "cancelled"}
+OPEN_STATUSES = (JobStatus.PENDING.value, JobStatus.UNASSIGNED.value)
 
 
 def _profile(db: Session, user: User) -> UserProfile:
@@ -33,7 +46,7 @@ def _profile(db: Session, user: User) -> UserProfile:
 def _event(db: Session, job: Job, user: User, action: str, *, before: str | None = None,
            after: str | None = None, old_id: int | None = None, new_id: int | None = None,
            reason: str | None = None) -> None:
-    db.add(BookingEvent(job_id=job.id, actor_user_id=user.id, actor_role=user.role,
+    db.add(BookingEvent(job_id=job.id, actor_user_id=user.id, actor_role=active_role(user),
                         action=action, from_status=before, to_status=after,
                         old_electrician_id=old_id, new_electrician_id=new_id, reason=reason))
 
@@ -150,7 +163,7 @@ def _manual_assign(db: Session, job: Job, electrician: Electrician, reason: str,
     job.feasibility = "feasible"
     job.unassigned_reasons = None
     manual = db.get(ManualDispatchOverride, job.id)
-    if user.role == "admin":
+    if active_role(user) == "admin":
         if manual is None:
             manual = ManualDispatchOverride(job_id=job.id, electrician_id=electrician.id, reason=reason, active=True)
             db.add(manual)
@@ -160,7 +173,7 @@ def _manual_assign(db: Session, job: Job, electrician: Electrician, reason: str,
             manual.active = True
     elif manual:
         manual.active = False
-    _event(db, job, user, "manually_assigned" if user.role == "admin" else "accepted",
+    _event(db, job, user, "manually_assigned" if active_role(user) == "admin" else "accepted",
            before=before,
            after=JobStatus.ASSIGNED.value, old_id=old_id, new_id=electrician.id, reason=reason)
     db.flush()
@@ -173,13 +186,121 @@ def _dispatch_again(db: Session, trigger: str) -> None:
         execute_run(db, trigger=trigger, mode=RunMode.INCREMENTAL)
 
 
+@router.get("/customer/electricians")
+def customer_electricians(
+    window_start: datetime = Query(),
+    window_end: datetime = Query(),
+    duration_minutes: int = Query(gt=0, le=720),
+    locality: str = Query(min_length=1, max_length=120),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role("customer")),
+):
+    """List available active electricians registered for this exact customer locality."""
+    electricians = load_electricians(db, active_only=True)
+    candidates = []
+    for electrician in electricians:
+        if not serves_locality(electrician, locality):
+            continue
+        slot = available_slot(db, electrician, window_start=window_start.replace(tzinfo=None),
+                              window_end=window_end.replace(tzinfo=None), duration_minutes=duration_minutes)
+        if slot is None:
+            continue
+        candidates.append({
+            "id": electrician.id,
+            "name": electrician.name,
+            "employee_code": electrician.employee_code,
+            "service_area": ", ".join(x.locality for x in electrician.service_localities) or "Service area not listed",
+            "available_from": slot[0],
+            "available_until": slot[1],
+            "availability": "No overlapping booking; electrician response required",
+        })
+    return candidates
+
+
+@router.get("/customer/localities")
+def customer_localities(zone_code: str = Query(min_length=1, max_length=20),
+                        db: Session = Depends(get_db),
+                        user: User = Depends(require_role("customer"))):
+    """Locality suggestions from active electricians' registered service areas."""
+    return sorted({area.locality for electrician in load_electricians(db, active_only=True)
+                   if any(zone.code == zone_code for zone in electrician.zones)
+                   for area in electrician.service_localities}, key=str.casefold)
+
+
 @router.get("/customer/bookings")
 def customer_bookings(db: Session = Depends(get_db), user: User = Depends(require_role("customer"))):
-    jobs = db.scalars(select(Job).join(BookingOwner).where(BookingOwner.user_id == user.id)
-                      .options(selectinload(Job.zone), selectinload(Job.required_skills),
-                               selectinload(Job.assignments).selectinload(Assignment.electrician))
-                      .order_by(Job.created_at.desc()))
-    return [job_dict(j) for j in jobs]
+    jobs = list(db.scalars(select(Job).join(BookingOwner).where(BookingOwner.user_id == user.id)
+                           .options(selectinload(Job.zone), selectinload(Job.required_skills),
+                                    selectinload(Job.assignments).selectinload(Assignment.electrician))
+                           .order_by(Job.created_at.desc())))
+    feedback_by_job = {
+        feedback.job_id: feedback
+        for feedback in db.scalars(select(BookingFeedback).where(
+            BookingFeedback.user_id == user.id,
+            BookingFeedback.job_id.in_([job.id for job in jobs]),
+        ))
+    } if jobs else {}
+    complaints_by_job = {
+        complaint.job_id: complaint
+        for complaint in db.scalars(select(BookingComplaint).where(
+            BookingComplaint.user_id == user.id,
+            BookingComplaint.job_id.in_([job.id for job in jobs]),
+        ))
+    } if jobs else {}
+    results = []
+    for job in jobs:
+        result = job_dict(job)
+        feedback = feedback_by_job.get(job.id)
+        result["feedback"] = ({"rating": feedback.rating, "comment": feedback.comment,
+                               "submitted_at": feedback.submitted_at} if feedback else None)
+        complaint = complaints_by_job.get(job.id)
+        result["complaint"] = ({"issue_type": complaint.issue_type, "description": complaint.description,
+                                "created_at": complaint.created_at} if complaint else None)
+        results.append(result)
+    return results
+
+
+@router.post("/customer/bookings/{job_id}/feedback", status_code=201)
+def submit_customer_feedback(job_id: int, data: CustomerFeedbackIn,
+                             db: Session = Depends(get_db),
+                             user: User = Depends(require_role("customer"))):
+    job = get_job(db, job_id)
+    owns_booking = db.scalar(select(BookingOwner.job_id).where(
+        BookingOwner.job_id == job_id, BookingOwner.user_id == user.id))
+    if owns_booking is None:
+        raise not_found("Booking", job_id)
+    if job.status != JobStatus.COMPLETED.value:
+        raise ApiError(409, "FEEDBACK_REQUIRES_COMPLETED_BOOKING",
+                       "Feedback is available after the service is completed.")
+    if db.get(BookingFeedback, job_id) is not None:
+        raise ApiError(409, "FEEDBACK_ALREADY_SUBMITTED", "Feedback has already been submitted for this booking.")
+
+    feedback = BookingFeedback(job_id=job_id, user_id=user.id, rating=data.rating,
+                                comment=(data.comment.strip() or None) if data.comment else None)
+    db.add(feedback)
+    db.commit()
+    return {"job_id": feedback.job_id, "rating": feedback.rating, "comment": feedback.comment,
+            "submitted_at": feedback.submitted_at}
+
+
+@router.post("/customer/bookings/{job_id}/complaint", status_code=201)
+def submit_customer_complaint(job_id: int, data: CustomerComplaintIn,
+                              db: Session = Depends(get_db),
+                              user: User = Depends(require_role("customer"))):
+    job = get_job(db, job_id)
+    owns_booking = db.scalar(select(BookingOwner.job_id).where(
+        BookingOwner.job_id == job_id, BookingOwner.user_id == user.id))
+    if owns_booking is None:
+        raise not_found("Booking", job_id)
+    if db.get(BookingComplaint, job_id) is not None:
+        raise ApiError(409, "COMPLAINT_ALREADY_SUBMITTED", "A complaint has already been submitted for this booking.")
+
+    complaint = BookingComplaint(job_id=job.id, user_id=user.id, issue_type=data.issue_type,
+                                 description=(data.description.strip() or None) if data.description else None)
+    db.add(complaint)
+    db.commit()
+    return {"job_id": complaint.job_id, "issue_type": complaint.issue_type,
+            "description": complaint.description, "created_at": complaint.created_at}
 
 
 @router.post("/customer/bookings/{job_id}/cancel")
@@ -189,9 +310,11 @@ def cancel_customer_booking(job_id: int, reason: str | None = Query(default=None
     if db.scalar(select(BookingOwner.job_id).where(BookingOwner.job_id == job_id, BookingOwner.user_id == user.id)) is None:
         raise not_found("Booking", job_id)
     before = job.status
-    transition(db, job, JobStatus.CANCELLED.value, reason=reason or "Cancelled by customer")
+    reason = (reason or "").strip() or "Cancelled by customer"
+    old_id = job.active_assignment.electrician_id if job.active_assignment else None
+    transition(db, job, JobStatus.CANCELLED.value, reason=reason)
     _clear_manual_override(db, job.id)
-    _event(db, job, user, "cancelled_by_customer", before=before, after=job.status, reason=reason)
+    _event(db, job, user, "cancelled_by_customer", before=before, after=job.status, old_id=old_id, reason=reason)
     db.commit()
     return job_dict(get_job(db, job_id))
 
@@ -247,41 +370,76 @@ def set_default_payment_method(method_id: int, db: Session = Depends(get_db), us
 
 @router.get("/electrician/bookings")
 def electrician_bookings(db: Session = Depends(get_db), user: User = Depends(require_role("electrician"))):
-    profile = _profile(db, user)
-    owned_ids = set(db.scalars(select(Assignment.job_id).where(
-        Assignment.electrician_id == profile.electrician_id, Assignment.is_active.is_(True))))
-    jobs = list(db.scalars(select(Job).where(Job.status.in_([JobStatus.ASSIGNED.value, JobStatus.IN_PROGRESS.value]))
-                           .options(selectinload(Job.zone), selectinload(Job.required_skills),
-                                    selectinload(Job.assignments).selectinload(Assignment.electrician))))
-    assigned = [job_dict(j) for j in jobs if j.id in owned_ids]
-    offers = []
-    electrician = get_electrician(db, profile.electrician_id)
-    for j in db.scalars(select(Job).where(Job.status.in_([JobStatus.PENDING.value, JobStatus.UNASSIGNED.value]))
-                        .options(selectinload(Job.zone), selectinload(Job.required_skills))):
-        if _eligible_local_offer(db, j, electrician):
-            offers.append(job_dict(j))
-    offers.sort(key=lambda item: item["window_start"])
-    override = db.get(AvailabilityOverride, electrician.id)
-    available = override.is_available if override else True
-    on_duty = db.scalar(select(DutySession.id).where(
-        DutySession.electrician_id == electrician.id, DutySession.ended_at.is_(None))) is not None
-    electrician_view = electrician_dict(electrician)
-    if not available:
-        electrician_view["current_status"] = "unavailable"
-    return {"assigned": assigned, "offers": offers,
-            "electrician": electrician_view,
-            "availability": {"is_available": available}, "on_duty": on_duty}
+    if "admin" in authorized_roles(db, user):
+        electricians = load_electricians(db, active_only=True)
+    else:
+        profile = _profile(db, user)
+        electricians = [get_electrician(db, profile.electrician_id)]
+
+    electrician_ids = [electrician.id for electrician in electricians]
+    requests_by_electrician = {electrician_id: [] for electrician_id in electrician_ids}
+    active_by_electrician = {electrician_id: [] for electrician_id in electrician_ids}
+    history_by_electrician = {electrician_id: [] for electrician_id in electrician_ids}
+    if electrician_ids:
+        jobs = list(db.scalars(
+            select(Job).join(Assignment, Assignment.job_id == Job.id)
+            .join(BookingOwner, BookingOwner.job_id == Job.id)
+            .where(
+                Assignment.electrician_id.in_(electrician_ids),
+                Assignment.is_active.is_(True),
+                Job.status.in_([JobStatus.ASSIGNED.value, JobStatus.IN_PROGRESS.value,
+                                JobStatus.COMPLETED.value]),
+            )
+            .options(selectinload(Job.zone), selectinload(Job.required_skills),
+                     selectinload(Job.assignments).selectinload(Assignment.electrician))
+            .order_by(Job.window_start)
+        ))
+        for job in jobs:
+            assignment = job.active_assignment
+            if assignment is None:
+                continue
+            request = job_dict(job)
+            if job.status == JobStatus.COMPLETED.value:
+                history_by_electrician[assignment.electrician_id].append(request)
+            elif request["booking_stage"] == "awaiting_response":
+                requests_by_electrician[assignment.electrician_id].append(request)
+            else:
+                active_by_electrician[assignment.electrician_id].append(request)
+
+    for history in history_by_electrician.values():
+        history.sort(key=lambda booking: booking.get("actual_end") or booking["window_start"], reverse=True)
+
+    return {
+        "electricians": [
+            {"electrician": electrician_dict(electrician),
+             "assigned": requests_by_electrician[electrician.id],
+             "active": active_by_electrician[electrician.id],
+             "history": history_by_electrician[electrician.id],
+             "completed_count": len(history_by_electrician[electrician.id])}
+            for electrician in electricians
+        ],
+        "all_electricians": "admin" in authorized_roles(db, user),
+    }
 
 
 @router.post("/electrician/bookings/{job_id}/action")
 def electrician_booking_action(job_id: int, data: BookingActionIn, db: Session = Depends(get_db),
                                user: User = Depends(require_role("electrician"))):
-    profile = _profile(db, user)
-    electrician = get_electrician(db, profile.electrician_id)
+    roles = authorized_roles(db, user)
+    if data.electrician_id is not None:
+        if "admin" not in roles:
+            raise ApiError(403, "FORBIDDEN", "Only an administrator can respond on behalf of another electrician.")
+        electrician = get_electrician(db, data.electrician_id)
+    else:
+        profile = _profile(db, user)
+        electrician = get_electrician(db, profile.electrician_id)
     job = get_job(db, job_id)
     action = data.action
     before = job.status
     active = job.active_assignment
+    reason = data.reason.strip() if data.reason else None
+    if action in RELEASE_ACTIONS and not reason:
+        raise ApiError(422, "REASON_REQUIRED", "Add a short reason before declining or cancelling this booking.")
     if action == "accept":
         if job.status not in (JobStatus.ASSIGNED.value, JobStatus.PENDING.value, JobStatus.UNASSIGNED.value):
             raise ApiError(409, "BOOKING_NOT_AVAILABLE", "This booking is no longer awaiting an electrician response.")
@@ -296,14 +454,12 @@ def electrician_booking_action(job_id: int, data: BookingActionIn, db: Session =
     if action == "decline" and active is None and job.status in (JobStatus.PENDING.value, JobStatus.UNASSIGNED.value):
         if not _eligible_local_offer(db, job, electrician):
             raise ApiError(403, "BOOKING_NOT_ELIGIBLE", "This booking is not an available local offer for your profile.")
-        if not data.reason:
-            raise ApiError(422, "REASON_REQUIRED", "Add a short reason for declining this booking.")
         existing = db.scalar(select(BookingDecline.id).where(
             BookingDecline.job_id == job.id, BookingDecline.electrician_id == electrician.id))
         if existing is None:
-            db.add(BookingDecline(job_id=job.id, electrician_id=electrician.id, reason=data.reason))
+            db.add(BookingDecline(job_id=job.id, electrician_id=electrician.id, reason=reason))
         _clear_manual_override(db, job.id, electrician.id)
-        _event(db, job, user, "declined", before=before, after=before, old_id=electrician.id, reason=data.reason)
+        _event(db, job, user, "declined", before=before, after=before, old_id=electrician.id, reason=reason)
         _dispatch_again(db, "electrician_declined_offer")
         return job_dict(get_job(db, job_id))
     if not active or active.electrician_id != electrician.id:
@@ -323,20 +479,23 @@ def electrician_booking_action(job_id: int, data: BookingActionIn, db: Session =
     elif action in ("decline", "cancel", "customer_unavailable"):
         if job.status != JobStatus.ASSIGNED.value:
             raise ApiError(409, "INVALID_STATUS", "Only an assigned booking can be released to dispatch.")
-        if action != "cancel" and not data.reason:
-            raise ApiError(422, "REASON_REQUIRED", "Add a short reason for declining or marking the customer unavailable.")
         old_id = active.electrician_id
         active.is_active = False
         job.status = JobStatus.UNASSIGNED.value
         _clear_manual_override(db, job.id, old_id)
-        job.cancel_reason = data.reason if action == "cancel" else None
+        job.cancel_reason = reason if action == "cancel" else None
         existing = db.scalar(select(BookingDecline.id).where(
             BookingDecline.job_id == job.id, BookingDecline.electrician_id == old_id))
         if existing is None:
-            db.add(BookingDecline(job_id=job.id, electrician_id=old_id, reason=data.reason or action))
+            db.add(BookingDecline(job_id=job.id, electrician_id=old_id, reason=reason))
         _event(db, job, user, action, before=before, after=job.status,
-               old_id=old_id, reason=data.reason)
-        _dispatch_again(db, f"electrician_{action}")
+               old_id=old_id, reason=reason)
+        is_customer_booking = db.scalar(select(BookingOwner.job_id).where(BookingOwner.job_id == job.id)) is not None
+        if is_customer_booking:
+            # Keep declined customer requests visible for local offers and admin reassignment.
+            db.commit()
+        else:
+            _dispatch_again(db, f"electrician_{action}")
         return job_dict(get_job(db, job_id))
     db.commit()
     return job_dict(get_job(db, job_id))
@@ -443,6 +602,7 @@ def electrician_earnings(start: date | None = None, end: date | None = None,
 
 @router.get("/admin/overview")
 def admin_overview(locality: str | None = None, start: date | None = None, end: date | None = None,
+                   electrician_id: int | None = None,
                    db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
     query = select(Job).options(selectinload(Job.booking_details), selectinload(Job.assignments),
                                 selectinload(Job.zone)).order_by(Job.window_start.desc())
@@ -452,25 +612,74 @@ def admin_overview(locality: str | None = None, start: date | None = None, end: 
         query = query.where(Job.window_start < datetime.combine(end + timedelta(days=1), time.min))
     if locality:
         query = query.join(BookingDetails).where(BookingDetails.locality.ilike(f"%{locality.strip()}%"))
+    if electrician_id:
+        query = query.where(Job.assignments.any(Assignment.electrician_id == electrician_id))
     jobs = list(db.scalars(query))
-    methods = list(db.scalars(select(BookingDetails).where(BookingDetails.job_id.in_([j.id for j in jobs])))) if jobs else []
+    job_ids = [job.id for job in jobs]
+    owner_job_ids = set(db.scalars(select(BookingOwner.job_id).where(BookingOwner.job_id.in_(job_ids)))) if job_ids else set()
+    order_jobs = [job for job in jobs if job.booking_details is not None or job.id in owner_job_ids]
+    order_job_ids = [job.id for job in order_jobs]
+    methods = list(db.scalars(select(BookingDetails).where(BookingDetails.job_id.in_(order_job_ids)))) if order_job_ids else []
     user_count = db.scalar(select(func.count(User.id)).where(User.role == "customer")) or 0
+    customers_booked = db.scalar(select(func.count(func.distinct(BookingOwner.user_id))).where(
+        BookingOwner.job_id.in_(order_job_ids))) if order_job_ids else 0
+    today = date.today()
+    orders_today = db.scalar(select(func.count(BookingDetails.job_id)).join(Job, Job.id == BookingDetails.job_id).where(
+        Job.created_at >= datetime.combine(today, time.min),
+        Job.created_at < datetime.combine(today + timedelta(days=1), time.min))) or 0
+    total_orders = db.scalar(select(func.count(BookingDetails.job_id))) or 0
+    # Orders (customer bookings) still open with no electrician on them, regardless of the list filters.
+    is_order = Job.booking_details.has() | Job.id.in_(select(BookingOwner.job_id))
+    pending_dispatch = db.scalar(select(func.count(Job.id)).where(
+        is_order, Job.status.in_(OPEN_STATUSES), ~Job.assignments.any(Assignment.is_active.is_(True)))) or 0
     electricians = load_electricians(db, active_only=False)
     in_progress = {eid for eid, _ in db.execute(select(Assignment.electrician_id, Assignment.job_id).join(Job).where(
         Assignment.is_active.is_(True), Job.status == JobStatus.IN_PROGRESS.value)).all()}
+    unavailable_ids = set(db.scalars(select(AvailabilityOverride.electrician_id).where(
+        AvailabilityOverride.is_available.is_(False))))
     now = datetime.now()
-    overview = {"bookings": len(jobs), "assigned": sum(bool(j.active_assignment) for j in jobs),
-                "needs_attention": sum(j.status == JobStatus.UNASSIGNED.value for j in jobs),
-                "customers": user_count, "electricians": len(electricians),
+    active_count = sum(e.active for e in electricians)
+    overview = {"bookings": len(order_jobs), "total_orders": total_orders, "orders_today": orders_today,
+                "assigned": sum(bool(j.active_assignment) for j in order_jobs),
+                "needs_attention": sum(j.status == JobStatus.UNASSIGNED.value for j in order_jobs),
+                "pending_dispatch": pending_dispatch,
+                "customers": user_count, "customers_booked": customers_booked, "electricians": len(electricians),
+                "active_electricians": active_count, "inactive_electricians": len(electricians) - active_count,
+                # Available now: active, inside a shift, not on a job, no unavailable period and not switched off.
                 "available_electricians": sum(electrician_status(e, now, {x for x in in_progress if x == e.id}) == "on_shift"
-                                              and (db.get(AvailabilityOverride, e.id) is None
-                                                   or db.get(AvailabilityOverride, e.id).is_available)
-                                              for e in electricians),
+                                              and e.id not in unavailable_ids for e in electricians),
                 "payment_total": round(sum(x.amount for x in methods), 2),
                 "payment_status": {status: sum(x.payment_status == status for x in methods)
                                    for status in ("pending", "paid", "failed", "refunded")},
-                "jobs": [job_dict(j) for j in jobs]}
+                "jobs": [job_dict(j) for j in order_jobs]}
     return overview
+
+
+@router.get("/admin/booking-activity")
+def admin_booking_activity(limit: int = Query(default=50, ge=1, le=200),
+                           db: Session = Depends(get_db), user: User = Depends(require_role("admin"))):
+    """Recent electrician declines and booking cancellations, with whether the booking still needs an electrician."""
+    events = list(db.scalars(select(BookingEvent).where(BookingEvent.action.in_(ACTIVITY_ACTIONS))
+                             .order_by(BookingEvent.created_at.desc(), BookingEvent.id.desc()).limit(limit)))
+    job_ids = {ev.job_id for ev in events}
+    jobs = {j.id: j for j in db.scalars(select(Job).where(Job.id.in_(job_ids)).options(
+        selectinload(Job.assignments).selectinload(Assignment.electrician)))} if job_ids else {}
+    users = {u.id: u.username for u in db.scalars(select(User))}
+    names = {e.id: e.name for e in db.scalars(select(Electrician))}
+    items = []
+    for ev in events:
+        job = jobs[ev.job_id]
+        current = job.active_assignment
+        items.append({
+            "id": ev.id, "job_id": job.id, "job_number": job.job_number, "title": job.title,
+            "action": ev.action, "actor_role": ev.actor_role, "actor": users.get(ev.actor_user_id),
+            "electrician_id": ev.old_electrician_id, "electrician": names.get(ev.old_electrician_id),
+            "reason": ev.reason, "created_at": ev.created_at,
+            "job_status": job.status,
+            "needs_reassignment": job.status in OPEN_STATUSES and current is None,
+            "current_electrician": current.electrician.name if current and current.electrician else None,
+        })
+    return {"events": items, "needs_reassignment": len({x["job_id"] for x in items if x["needs_reassignment"]})}
 
 
 @router.get("/admin/customers")
@@ -521,6 +730,7 @@ def create_customer(data: CustomerAccountIn, db: Session = Depends(get_db), user
     customer = User(username=data.username, password_hash=hash_password(data.password), role="customer")
     db.add(customer)
     db.flush()
+    grant_role(db, customer, "customer")
     db.add(UserProfile(user_id=customer.id, display_name=data.display_name))
     db.commit()
     return {"id": customer.id, "username": customer.username, "role": customer.role,
@@ -530,10 +740,11 @@ def create_customer(data: CustomerAccountIn, db: Session = Depends(get_db), user
 @router.get("/bookings/{job_id}/history")
 def booking_history(job_id: int, db: Session = Depends(get_db), user: User = Depends(require_role("admin", "customer", "electrician"))):
     job = get_job(db, job_id)
-    if user.role == "customer":
+    role = active_role(user)
+    if role == "customer":
         if db.scalar(select(BookingOwner.job_id).where(BookingOwner.job_id == job_id, BookingOwner.user_id == user.id)) is None:
             raise not_found("Booking", job_id)
-    elif user.role == "electrician":
+    elif role == "electrician":
         profile = _profile(db, user)
         if not any(a.electrician_id == profile.electrician_id for a in job.assignments):
             raise not_found("Booking", job_id)

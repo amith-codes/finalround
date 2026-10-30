@@ -44,6 +44,27 @@ export function minutesLabel(m) {
 
 export const humanize = (s) => (s ? s.replaceAll('_', ' ') : '')
 
+export const rupees = (n) => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+
+// Labels for the backend's job.booking_stage (services/serializers.py::booking_stage).
+export const BOOKING_STAGES = {
+  awaiting_dispatch: 'Finding an electrician',
+  awaiting_response: 'Awaiting electrician response',
+  accepted: 'Accepted',
+  reassignment_needed: 'Reassignment needed',
+  in_progress: 'In progress',
+  completed: 'Completed',
+  cancelled: 'Cancelled',
+}
+export const stageLabel = (job) => BOOKING_STAGES[job.booking_stage] || humanize(job.status)
+
+/** Appointment window as "Sat 31 Oct 09:00–13:00", or start → end across days. */
+export function fmtWindow(start, end) {
+  if (!start) return '—'
+  if (!end) return fmtDateTime(start)
+  return start.slice(0, 10) === end.slice(0, 10) ? `${fmtDateTime(start)}–${fmtTime(end)}` : `${fmtDateTime(start)} → ${fmtDateTime(end)}`
+}
+
 export const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 export const PRIORITIES = ['urgent', 'high', 'medium', 'low']
 export const STATUSES = ['pending', 'assigned', 'in_progress', 'completed', 'cancelled', 'unassigned']

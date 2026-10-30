@@ -1,35 +1,27 @@
 import { useState } from 'react'
 import { Link, useOutletContext } from 'react-router-dom'
 import JobDetail from '../components/JobDetail'
-import { BeforeAfter, ChangesTable, MetricsCompare } from '../components/RunReport'
-import { Card, Empty, ErrorBox, Loading, PriorityBadge, Reasons, SlaBadge, Stat, StatusBadge, useLoad } from '../components/ui'
+import { Card, Empty, ErrorBox, Loading, Stat, useLoad } from '../components/ui'
 import { Api } from '../services/api'
-import { fmtDateTime, humanize, isoDay, minutesLabel, PRIORITIES, STATUSES } from '../services/format'
+import { fmtDateTime, rupees, stageLabel } from '../services/format'
 
 export default function Dashboard() {
   const { version, bump } = useOutletContext()
   const [selected, setSelected] = useState(null)
-  const today = isoDay(new Date())
-  const [earningsPeriod, setEarningsPeriod] = useState({ start: `${today.slice(0, 8)}01`, end: today })
-  const { data, error, loading } = useLoad(async () => {
-    const [overview, sla, workload, comparison, portal, earnings] = await Promise.all([
-      Api.overview(), Api.sla(), Api.workload(isoDay(new Date()), 4), Api.comparison(), Api.adminOverview(),
-      Api.adminEarnings(earningsPeriod.start, earningsPeriod.end),
-    ])
-    return { overview, sla, workload, comparison, portal, earnings }
-  }, [version, earningsPeriod])
+  const { data, error, loading, reload } = useLoad(async () => {
+    const [overview, portal] = await Promise.all([Api.overview(), Api.adminOverview()])
+    return { overview, portal }
+  }, [version])
 
   if (loading && !data) return <Loading what="Loading dashboard" />
   if (error) return <ErrorBox error={error} />
-  const { overview: ov, sla, workload, comparison, portal, earnings } = data
-  const run = comparison.run
-  const s = ov.jobs_by_status
-  const maxUtil = Math.max(100, ...workload.electricians.map((e) => e.utilisation_pct || 0))
+  const { overview: ov, portal } = data
 
   return (
     <div className="stack">
       <div className="page-head">
         <h1>Operations dashboard</h1>
+        <button className="btn" onClick={reload} disabled={loading}>{loading ? 'Refreshing…' : 'Refresh'}</button>
         <span className="muted">
           {ov.latest_run ? <>Last schedule {fmtDateTime(ov.latest_run.finished_at)} · <Link to={`/history/${ov.latest_run.id}`}>run details</Link></> : 'No schedule yet — press “Run scheduling”.'}
         </span>
@@ -37,136 +29,41 @@ export default function Dashboard() {
       <p className="small"><Link to="/customers">Manage customer accounts</Link></p>
       {ov.latest_failed_run && ov.latest_failed_run.started_at > (ov.latest_run?.started_at || '') && (
         <div className="alert error">
-          Latest run {humanize(ov.latest_failed_run.status)}: {ov.latest_failed_run.error}. The previous schedule is still in effect.
+          Latest run {ov.latest_failed_run.status.replaceAll('_', ' ')}: {ov.latest_failed_run.error}. The previous schedule is still in effect.
         </div>
       )}
 
-      <div className="stats">
-        <Stat label="Open jobs" value={s.pending + s.assigned + s.unassigned + s.in_progress} />
-        <Stat label="Assigned" value={s.assigned} tone="good" />
-        <Stat label="In progress" value={s.in_progress} tone="info" />
-        <Stat label="Unassigned" value={s.unassigned} tone={s.unassigned ? 'warn' : ''} hint={`${s.pending} pending, not yet scheduled`} />
-        <Stat label="SLA overdue / late" value={`${sla.counts.overdue} / ${sla.counts.late}`} tone={sla.counts.overdue + sla.counts.late ? 'bad' : ''} />
-        <Stat label="SLA at risk" value={sla.counts.at_risk} tone={sla.counts.at_risk ? 'warn' : ''} />
-        <Stat label="Electricians on shift" value={`${(ov.electricians.on_shift || 0) + (ov.electricians.on_job || 0)} / ${ov.electricians.total}`}
-              hint={`${ov.electricians.on_job || 0} on a job · ${ov.electricians.unavailable || 0} unavailable`} />
+      <div className="stats admin-summary-stats">
+        <Stat label="Orders received today" value={portal.orders_today} hint={`${portal.total_orders} orders in total`} />
+        <Stat label="Registered electricians" value={portal.electricians}
+              hint={`${portal.active_electricians} active · ${portal.inactive_electricians} inactive`} />
+        <Stat label="Electricians available now" value={portal.available_electricians} tone={portal.available_electricians ? 'good' : 'warn'}
+              hint="Active, on shift, not on a job or marked unavailable" />
+        <Stat label="Orders pending dispatch" value={portal.pending_dispatch} tone={portal.pending_dispatch ? 'warn' : 'good'}
+              hint="Open orders with no electrician assigned" />
       </div>
 
-      <div className="stats portal-admin-stats">
-        <Stat label="Bookings in view" value={portal.bookings} />
-        <Stat label="Booking value" value={`₹${Number(portal.payment_total).toFixed(2)}`} hint={`${portal.payment_status.pending} payments pending`} />
-        <Stat label="Customers" value={portal.customers} />
-        <Stat label="Electricians available" value={`${portal.available_electricians} / ${portal.electricians}`} tone="good" />
-        <Stat label="Needs dispatch attention" value={portal.needs_attention} tone={portal.needs_attention ? 'warn' : 'good'} />
-      </div>
-
-      <Card title="Electrician earnings" actions={<span className="muted small">Gross service value for completed bookings</span>}>
-        <div className="period-filter"><label>From<input type="date" value={earningsPeriod.start} onChange={(e) => setEarningsPeriod({ ...earningsPeriod, start: e.target.value })} /></label><label>To<input type="date" value={earningsPeriod.end} onChange={(e) => setEarningsPeriod({ ...earningsPeriod, end: e.target.value })} /></label></div>
-        {!earnings.electricians.length ? <Empty>No completed booking earnings in this period.</Empty> : <div className="table-wrap"><table className="table compact"><thead><tr><th>Electrician</th><th>Completed bookings</th><th>Gross value</th></tr></thead><tbody>{earnings.electricians.map((item) => <tr key={item.electrician_id}><td><b>{item.electrician_name}</b><div className="muted small">{item.employee_code}</div></td><td>{item.bookings.length}<div className="muted small">{item.bookings.map((job) => job.job_number).join(', ')}</div></td><td>₹{Number(item.gross_earnings).toFixed(2)}</td></tr>)}</tbody></table></div>}
+      <Card title="Electricians" actions={<Link to="/electricians?status=all">Manage all profiles</Link>}>
+        <div className="row gap wrap admin-electrician-actions">
+          <Link className="btn primary" to="/electricians?register=1">Register electrician</Link>
+          <Link className="btn" to="/electricians?status=inactive">View inactive ({portal.inactive_electricians})</Link>
+          <span className="muted small">Removing an electrician deactivates the profile; past bookings and history are kept.</span>
+        </div>
       </Card>
 
-      <div className="grid two">
-        <Card title="Jobs by status and priority">
-          <table className="table compact matrix">
-            <thead>
-              <tr><th>Status</th>{PRIORITIES.map((p) => <th key={p}><PriorityBadge value={p} /></th>)}<th>Total</th></tr>
-            </thead>
-            <tbody>
-              {STATUSES.map((st) => (
-                <tr key={st}>
-                  <td><StatusBadge value={st} /></td>
-                  {PRIORITIES.map((p) => {
-                    const n = ov.status_priority_matrix[st][p]
-                    return <td key={p} className={n ? (st === 'unassigned' && (p === 'urgent' || p === 'high') ? 'hot' : '') : 'zero'}>{n}</td>
-                  })}
-                  <td className="strong">{s[st]}</td>
-                </tr>
-              ))}
-            </tbody>
+      <Card title={`Bookings (${portal.bookings})`} actions={<Link to="/jobs">Open jobs</Link>}>
+        {!portal.jobs.length ? <Empty>No bookings yet.</Empty> : <div className="table-wrap">
+          <table className="table compact"><thead><tr><th>Customer</th><th>Service</th><th>Locality</th><th>Electrician</th><th>Appointment</th><th>Amount</th><th>Status</th></tr></thead>
+            <tbody>{portal.jobs.map((job) => <tr key={job.id} className="clickable" onClick={() => setSelected(job.id)}>
+              <td><b>{job.customer_name || 'Customer'}</b><div className="muted small">{job.job_number}</div></td>
+              <td>{job.title}</td><td>{job.service_locality || job.district || job.zone_name}</td>
+              <td>{job.assignment?.electrician_name || 'Needs assignment'}</td><td className="nowrap">{fmtDateTime(job.window_start)}</td>
+              <td className="nowrap">{rupees(job.booking_amount)}</td>
+              <td><span className={`badge status-${job.status}`}>{stageLabel(job)}</span></td>
+            </tr>)}</tbody>
           </table>
-        </Card>
-
-        <Card title="SLA risk" actions={<span className="muted small">sorted by time to deadline</span>}>
-          {[...sla.overdue, ...sla.late, ...sla.at_risk].length === 0 ? <Empty>No SLA risks.</Empty> : (
-            <div className="table-wrap short">
-              <table className="table compact">
-                <thead><tr><th>Job</th><th>State</th><th>Deadline</th><th>Left</th></tr></thead>
-                <tbody>
-                  {[...sla.overdue, ...sla.late, ...sla.at_risk].map((j) => (
-                    <tr key={j.id} className="clickable" onClick={() => setSelected(j.id)}>
-                      <td><b>{j.job_number}</b> <PriorityBadge value={j.priority} /><div className="muted small">{j.title}</div></td>
-                      <td><SlaBadge value={j.sla_state} /><div className="small muted">{humanize(j.status)}</div></td>
-                      <td className="nowrap">{fmtDateTime(j.sla_deadline)}</td>
-                      <td className={j.minutes_to_sla < 0 ? 'bad' : ''}>{minutesLabel(j.minutes_to_sla)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Card>
-      </div>
-
-      <div className="grid two">
-        <Card title={`Unassigned jobs (${sla.unassigned.length})`} actions={<Link to="/jobs?status=unassigned">open in Jobs</Link>}>
-          {sla.unassigned.length === 0 ? <Empty>Nothing unassigned.</Empty> : (
-            <div className="unassigned-list scroll">
-              {[...sla.unassigned].sort((a, b) => PRIORITIES.indexOf(a.priority) - PRIORITIES.indexOf(b.priority)).map((j) => (
-                <div key={j.id} className="unassigned-item clickable" onClick={() => setSelected(j.id)}>
-                  <div className="row gap wrap">
-                    <b>{j.job_number}</b> <PriorityBadge value={j.priority} />
-                    <span className={`badge feas-${j.feasibility}`}>{humanize(j.feasibility)}</span>
-                    <span className="muted small">{j.zone_code} · {fmtDateTime(j.window_start)}</span>
-                  </div>
-                  <div className="small">{j.title}</div>
-                  <Reasons reasons={(j.unassigned_reasons || []).filter((r) => r.code !== 'HISTORY').slice(0, 1)} />
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
-
-        <Card title="Electrician workload" actions={<span className="muted small">{workload.from} → {workload.to}</span>}>
-          <div className="table-wrap short">
-            <table className="table compact">
-              <thead><tr><th>Electrician</th><th>Status</th><th>Jobs</th><th>Utilisation (work + travel / shift)</th></tr></thead>
-              <tbody>
-                {workload.electricians.map((e) => (
-                  <tr key={e.electrician_id}>
-                    <td><b>{e.name}</b><div className="muted small">{e.zones.join(' · ')}</div></td>
-                    <td><span className={`badge avail-${e.status}`}>{humanize(e.status)}</span></td>
-                    <td>{e.jobs}{e.urgent_or_high ? <span className="muted small"> ({e.urgent_or_high} hi)</span> : null}</td>
-                    <td>
-                      <div className="bar" title={`${e.work_minutes} min work, ${e.travel_minutes} min travel of ${e.shift_minutes} min shift`}>
-                        <div className="bar-work" style={{ width: `${(100 * e.work_minutes / (e.shift_minutes || 1)) * 100 / maxUtil}%` }} />
-                        <div className="bar-travel" style={{ width: `${(100 * e.travel_minutes / (e.shift_minutes || 1)) * 100 / maxUtil}%` }} />
-                      </div>
-                      <span className="small">{e.utilisation_pct ?? 0}%</span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="legend small"><span className="sw work" /> work <span className="sw travel" /> travel</div>
-        </Card>
-      </div>
-
-      {run ? (
-        <Card title={`Latest run: before vs after (${humanize(run.trigger)})`}
-              actions={<Link to={`/history/${run.id}`}>full audit record</Link>}>
-          <div className="grid side">
-            <MetricsCompare before={comparison.previous_metrics} after={run.metrics}
-                            beforeObjective={comparison.previous_objective} afterObjective={run.objective_score} />
-            <div>
-              <h3>Electricians whose plan changed</h3>
-              <BeforeAfter before={run.before_snapshot} after={run.after_snapshot} changes={run.changes} />
-            </div>
-          </div>
-          <h3>Changes and reasons</h3>
-          <ChangesTable changes={run.changes} />
-        </Card>
-      ) : <Card title="Latest run"><Empty>No scheduling run yet.</Empty></Card>}
+        </div>}
+      </Card>
 
       {selected && <JobDetail jobId={selected} onClose={() => setSelected(null)} onChanged={bump} />}
     </div>

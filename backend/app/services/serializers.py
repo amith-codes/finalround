@@ -55,9 +55,33 @@ def assignment_dict(a: Assignment | None) -> dict | None:
     }
 
 
+def booking_stage(job: Job, request_status: str | None) -> str:
+    """Customer-facing stage: awaiting_dispatch | awaiting_response | accepted | reassignment_needed |
+    in_progress | completed | cancelled."""
+    if job.status in (JobStatus.CANCELLED.value, JobStatus.COMPLETED.value, JobStatus.IN_PROGRESS.value):
+        return job.status
+    if job.status == JobStatus.ASSIGNED.value:
+        return "accepted" if request_status == "accepted" else "awaiting_response"
+    if request_status in ("declined", "released"):
+        return "reassignment_needed"
+    return "awaiting_dispatch"
+
+
 def job_dict(job: Job, now: datetime | None = None) -> dict:
     now = now or datetime.now()
     latest_event = job.booking_events[-1] if job.booking_events else None
+    request_event = next((event for event in reversed(job.booking_events)
+                          if event.action in {"booking_requested", "manually_assigned", "accepted", "declined",
+                                              "decline", "assigned", "reassigned", "unassigned", "cancel",
+                                              "customer_unavailable", "availability_cancelled_assignment"}), None)
+    request_status = None
+    if request_event:
+        request_status = {
+            "booking_requested": "pending", "manually_assigned": "pending",
+            "assigned": "pending", "reassigned": "pending", "accepted": "accepted",
+            "declined": "declined", "decline": "declined", "unassigned": "released", "cancel": "released",
+            "customer_unavailable": "released", "availability_cancelled_assignment": "released",
+        }[request_event.action]
     return {
         "id": job.id,
         "job_number": job.job_number,
@@ -77,6 +101,8 @@ def job_dict(job: Job, now: datetime | None = None) -> dict:
         "booking_amount": job.booking_details.amount if job.booking_details else 0,
         "payment_status": job.booking_details.payment_status if job.booking_details else "pending",
         "booking_action": latest_event.action if latest_event else None,
+        "request_status": request_status,
+        "booking_stage": booking_stage(job, request_status),
         "booking_update_reason": latest_event.reason if latest_event else None,
         "priority": job.priority,
         "duration_minutes": job.duration_minutes,

@@ -85,6 +85,34 @@ export function Modal({ title, onClose, children, wide }) {
   )
 }
 
+/** Modal that collects a required, non-empty reason before an action is sent. */
+export function ReasonDialog({ title, prompt, confirmLabel = 'Submit', busy, onSubmit, onClose }) {
+  const [reason, setReason] = useState('')
+  const [touched, setTouched] = useState(false)
+  const empty = !reason.trim()
+  const submit = (e) => {
+    e.preventDefault()
+    setTouched(true)
+    if (!empty) onSubmit(reason.trim())
+  }
+  return (
+    <Modal title={title} onClose={onClose}>
+      <form className="stack" onSubmit={submit}>
+        <label>{prompt}
+          <textarea rows={3} maxLength={250} value={reason} autoFocus
+                    onChange={(e) => setReason(e.target.value)} placeholder="e.g. Vehicle breakdown, outside my service hours" />
+        </label>
+        {touched && empty && <div className="alert error">A reason is required.</div>}
+        <p className="muted small">The reason is saved to the booking history and shown to the customer and dispatch.</p>
+        <div className="row gap end">
+          <button type="button" className="btn" onClick={onClose} disabled={busy}>Back</button>
+          <button className="btn danger" disabled={busy}>{busy ? 'Sending…' : confirmLabel}</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
 export function Reasons({ reasons }) {
   if (!reasons?.length) return null
   return (

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useOutletContext } from 'react-router-dom'
+import { useOutletContext, useSearchParams } from 'react-router-dom'
 import ElectricianForm from '../components/ElectricianForm'
 import { Card, ErrorBox, Loading, Modal, useLoad } from '../components/ui'
 import { useToast } from '../context/ToastContext'
@@ -64,19 +64,26 @@ function Unavailability({ electrician, onChanged }) {
 export default function Electricians() {
   const { version, bump } = useOutletContext()
   const toast = useToast()
-  const [showInactive, setShowInactive] = useState(false)
-  const [modal, setModal] = useState(null) // {mode: 'create'|'edit'|'unavail', e?}
+  const [params, setParams] = useSearchParams()
+  const [statusFilter, setStatusFilter] = useState(params.get('status') || 'active')
+  const [serviceAreaFilter, setServiceAreaFilter] = useState('')
+  const [localityFilter, setLocalityFilter] = useState('')
+  const [modal, setModal] = useState(() => (params.get('register') ? { mode: 'create' } : null)) // {mode: 'create'|'edit'|'unavail', e?}
+  const closeModal = () => {
+    setModal(null)
+    if (params.has('register')) { params.delete('register'); setParams(params, { replace: true }) }
+  }
   const { data, error, loading, reload } = useLoad(async () => {
-    const [electricians, skills, zones] = await Promise.all([Api.electricians(showInactive), Api.skills(), Api.zones()])
+    const [electricians, skills, zones] = await Promise.all([Api.electricians(true), Api.skills(), Api.zones()])
     return { electricians, skills, zones }
-  }, [version, showInactive])
+  }, [version])
 
   const save = async (body) => {
     try {
       if (modal.mode === 'create') await Api.createElectrician(body)
       else await Api.updateElectrician(modal.e.id, body)
       toast('Electrician saved', 'success')
-      setModal(null)
+      closeModal()
       bump()
     } catch (err) {
       toast(errorMessage(err), 'error')
@@ -101,30 +108,69 @@ export default function Electricians() {
       toast(errorMessage(err), 'error')
     }
   }
+  const remove = async (e) => {
+    if (!window.confirm(`Permanently delete ${e.name}? This cannot be undone. Electricians with booking history must be deactivated instead.`)) return
+    try {
+      await Api.removeElectrician(e.id)
+      toast(`${e.name} permanently deleted`, 'success')
+      bump()
+    } catch (err) {
+      toast(errorMessage(err), 'error')
+    }
+  }
 
   if (loading && !data) return <Loading what="Loading electricians" />
+  if (!data) return <div className="stack"><ErrorBox error={error} /><button className="btn" onClick={reload}>Retry</button></div>
   const current = modal?.e && data.electricians.find((x) => x.id === modal.e.id)
+  const activeCount = data.electricians.filter((e) => e.active).length
+  const filteredElectricians = data.electricians.filter((electrician) => {
+    const statusMatch = statusFilter === 'all' ||
+      (statusFilter === 'active' && electrician.active) ||
+      (statusFilter === 'inactive' && !electrician.active) ||
+      (statusFilter === 'available' && electrician.active && electrician.current_status === 'on_shift') ||
+      (statusFilter === 'unavailable' && electrician.current_status === 'unavailable') ||
+      (statusFilter === 'off_shift' && electrician.current_status === 'off_shift')
+    const areaMatch = !serviceAreaFilter || electrician.zones.includes(serviceAreaFilter)
+    const localityMatch = !localityFilter || electrician.localities.some((locality) => locality.toLowerCase().includes(localityFilter.trim().toLowerCase()))
+    return statusMatch && areaMatch && localityMatch
+  })
 
   return (
     <div className="stack">
       <div className="page-head">
-        <h1>Electricians</h1>
+        <div>
+          <h1>Electricians</h1>
+          <p className="muted">{data.electricians.length} registered · {activeCount} active · {data.electricians.length - activeCount} inactive (deactivated profiles keep their history)</p>
+        </div>
         <div className="row gap">
-          <label className="check"><input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} />Show inactive</label>
           <button className="btn primary" onClick={() => setModal({ mode: 'create' })}>Register electrician</button>
         </div>
       </div>
       <ErrorBox error={error} />
+      <Card title="Filter electricians">
+        <div className="period-filter electrician-filters">
+          <label>Status<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+            <option value="active">Active</option><option value="all">All</option><option value="inactive">Inactive</option>
+            <option value="available">Available now</option><option value="unavailable">Unavailable</option><option value="off_shift">Off shift</option>
+          </select></label>
+          <label>Service area<select value={serviceAreaFilter} onChange={(event) => setServiceAreaFilter(event.target.value)}>
+            <option value="">All service areas</option>{data.zones.map((zone) => <option key={zone.code} value={zone.code}>{zone.name}</option>)}
+          </select></label>
+          <label>Locality<input value={localityFilter} onChange={(event) => setLocalityFilter(event.target.value)} placeholder="Search service locality" /></label>
+        </div>
+      </Card>
       <Card>
         <div className="table-wrap">
           <table className="table">
-            <thead><tr><th>Electrician</th><th>Now</th><th>Skills</th><th>Zones</th><th>Shifts</th><th>Unavailable</th><th /></tr></thead>
+            <thead><tr><th>Electrician</th><th>Profile</th><th>Now</th><th>Zones</th><th>Shifts</th><th>Unavailable</th><th /></tr></thead>
             <tbody>
-              {data.electricians.map((e) => (
+              {filteredElectricians.map((e) => {
+                const displayedStatus = e.active ? 'on_job' : e.current_status
+                return (
                 <tr key={e.id} className={e.active ? '' : 'inactive'}>
                   <td><b>{e.name}</b><div className="muted small">{e.employee_code} · OT {e.max_overtime_minutes} min</div></td>
-                  <td><span className={`badge avail-${e.current_status}`}>{humanize(e.current_status)}</span></td>
-                  <td className="tags">{e.skills.map((s) => <span key={s} className="tag">{humanize(s)}</span>)}</td>
+                  <td><span className={`badge ${e.active ? 'avail-on_shift' : 'avail-inactive'}`}>{e.active ? 'Active' : 'Inactive'}</span></td>
+                  <td><span className={`badge avail-${displayedStatus}`}>{humanize(displayedStatus)}</span></td>
                   <td>{e.zones.join(', ')}<div className="muted small">Localities: {e.localities.join(', ') || 'Not set'}</div><div className="muted small">Base {Number(e.home_lat).toFixed(4)}, {Number(e.home_lon).toFixed(4)}</div></td>
                   <td className="small">{shiftSummary(e.shifts)}</td>
                   <td className="small">
@@ -136,20 +182,23 @@ export default function Electricians() {
                     {e.active
                       ? <button className="btn small danger" onClick={() => deactivate(e)}>Deactivate</button>
                       : <button className="btn small" onClick={() => reactivate(e)}>Reactivate</button>}
+                    {' '}<button className="btn small danger" onClick={() => remove(e)} title={`Delete ${e.name}`} aria-label={`Delete ${e.name}`}>🗑️</button>
                   </td>
                 </tr>
-              ))}
+                )
+              })}
+              {!filteredElectricians.length && <tr><td colSpan="7" className="muted">No electricians match these filters.</td></tr>}
             </tbody>
           </table>
         </div>
       </Card>
       {modal && modal.mode !== 'unavail' && (
-        <Modal title={modal.mode === 'create' ? 'Register electrician' : `Edit ${modal.e.name}`} onClose={() => setModal(null)} wide>
+        <Modal title={modal.mode === 'create' ? 'Register electrician' : `Edit ${modal.e.name}`} onClose={closeModal} wide>
           <ElectricianForm electrician={modal.e} skills={data.skills} zones={data.zones} onSubmit={save} />
         </Modal>
       )}
       {modal?.mode === 'unavail' && current && (
-        <Modal title={`Availability — ${current.name}`} onClose={() => setModal(null)}>
+        <Modal title={`Availability — ${current.name}`} onClose={closeModal}>
           <Unavailability electrician={current} onChanged={reload} />
         </Modal>
       )}

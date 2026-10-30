@@ -715,25 +715,26 @@ a:hover {
   padding: 0;
   margin: 0 0 15px;
   color: #404040;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 500;
   text-transform: none;
   letter-spacing: 0;
 }
 .service-category-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  column-gap: 8px;
-  row-gap: 18px;
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: 6px;
+  margin-left: -6px;
 }
 .service-category-tile {
   display: flex;
   min-width: 0;
-  min-height: 136px;
-  flex-direction: column;
+  min-height: 0;
+  flex-direction: row;
   align-items: center;
-  gap: 9px;
-  padding: 4px 3px 6px;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 4px 6px;
   border: 0;
   border-radius: 9px;
   background: #fff;
@@ -741,14 +742,14 @@ a:hover {
   font: inherit;
   font-size: 13px;
   line-height: 1.3;
-  text-align: center;
+  text-align: left;
   cursor: pointer;
 }
 .service-category-tile:hover .service-category-image { background-color: #efefef; }
 .service-category-image {
   display: block;
-  width: 80px;
-  height: 80px;
+  width: 72px;
+  height: 72px;
   flex: none;
   overflow: hidden;
   border: 2px solid transparent;
@@ -762,10 +763,12 @@ a:hover {
   background-color: #f1f1f1;
 }
 .service-category-name {
-  max-width: 106px;
+  min-width: 0;
+  flex: 1;
   color: #111;
-  font-size: 13px;
-  font-weight: 400;
+  font-size: 15px;
+  font-weight: 500;
+  text-align: left;
 }
 .service-sprite {
   background-image: url('/service-catalog-sprite.png');
@@ -1106,6 +1109,13 @@ a:hover {
   border-radius: 10px;
   background-color: #f4f4f4;
   box-shadow: none;
+}
+.service-plan-image.service-photo {
+  background-color: #fff;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+  border: 1px solid var(--border-light);
 }
 
 .service-stepper-wrap {
@@ -2078,6 +2088,61 @@ input:focus, select:focus, textarea:focus {
   .form .span2 { grid-column: span 1; }
 }
 
+/* Role control and the compact electrician choice fit the existing Dispatcher surfaces. */
+.role-switcher { position: relative; display: inline-flex; }
+.role-switcher-trigger {
+  display: inline-flex; align-items: center; gap: 7px; min-height: 34px;
+  padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--text); font: inherit; font-size: 12px; cursor: pointer;
+}
+.role-switcher-trigger:hover, .role-switcher-trigger[aria-expanded="true"] { border-color: var(--uc-purple); background: var(--uc-purple-light); }
+.role-switcher-icon { color: var(--uc-purple); font-size: 15px; }
+.role-switcher-caret { color: var(--muted); }
+.role-switcher-menu {
+  position: absolute; z-index: 1000; top: calc(100% + 7px); right: 0; width: 210px;
+  padding: 7px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+.role-switcher-caption { display: block; padding: 5px 8px 7px; color: var(--muted); font-size: 11px; }
+.role-switcher-option {
+  display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 8px;
+  border: 0; border-radius: 7px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.role-switcher-option:hover:not(:disabled) { background: var(--surface-hover); }
+.role-switcher-option.current { color: var(--uc-purple-dark); background: var(--uc-purple-light); }
+.role-switcher-option span:last-child { color: var(--muted); font-size: 11px; }
+.role-switcher-option:disabled { cursor: default; }
+.role-switch-form { min-width: min(340px, 76vw); }
+.role-switch-demo { margin: 0; padding: 9px 10px; border-radius: 7px; background: var(--surface-2); }
+
+.booking-electrician-picker { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border-light); }
+.booking-electrician-picker > .field-hint { display: block; margin: -7px 0 10px; }
+.booking-electrician-options { display: grid; gap: 8px; margin-top: 10px; }
+.booking-electrician-option {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px;
+  border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--text);
+  text-align: left; cursor: pointer; transition: border-color .15s, background .15s;
+}
+.booking-electrician-option:hover { border-color: #c8b8f7; background: var(--surface-2); }
+.booking-electrician-option.selected { border-color: var(--uc-purple); background: var(--uc-purple-light); }
+.electrician-choice-avatar { display: grid; place-items: center; flex: 0 0 38px; height: 38px; border-radius: 9px; background: var(--surface-hover); font-size: 20px; }
+.booking-electrician-copy { display: grid; gap: 1px; min-width: 0; flex: 1; }
+.booking-electrician-copy b { font-size: 13px; }
+.booking-electrician-copy small { color: var(--muted); font-size: 11px; }
+.booking-electrician-check { color: var(--uc-purple); font-size: 18px; }
+.electrician-choice-state { margin: 8px 0 2px; padding: 10px 11px; border-radius: 8px; background: var(--surface-hover); color: var(--text-secondary); font-size: 12px; }
+.electrician-choice-state.error { background: var(--bad-bg); color: var(--bad); }
+.alert.warning { background: var(--warn-bg); color: #92400e; border: 1px solid #fcd34d; }
+.admin-booking-filters, .electrician-filters { flex-wrap: wrap; align-items: end; }
+.admin-booking-filters label, .electrician-filters label { display: grid; gap: 4px; min-width: 145px; }
+.admin-booking-filters input, .admin-booking-filters select, .electrician-filters input, .electrician-filters select { min-width: 150px; }
+@media (max-width: 640px) {
+  .role-switcher-trigger { padding: 6px 8px; }
+  .booking-electrician-option { padding: 8px; }
+  .admin-booking-filters label, .electrician-filters label { min-width: 100%; }
+  .admin-booking-filters input, .admin-booking-filters select, .electrician-filters input, .electrician-filters select { width: 100%; }
+}
+
 /* Role specific workspaces */
 .portal-loading { min-height: 45vh; display: grid; place-items: center; color: var(--muted); padding: 24px; }
 .customer-action-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
@@ -2094,6 +2159,23 @@ input:focus, select:focus, textarea:focus {
 .customer-booking-grid small, .duty-row small { color: var(--muted); }
 .customer-booking-grid b { overflow-wrap: anywhere; font-weight: 500; }
 .customer-booking-actions { margin-top: 16px; }
+.feedback-form { min-width: min(420px, 78vw); }
+.complaint-form { min-width: min(420px, 78vw); }
+.feedback-rating-fieldset { display: grid; gap: 8px; }
+.feedback-stars { display: flex; align-items: center; gap: 8px; }
+.feedback-star { min-width: 44px; min-height: 44px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: #a9a9b2; font-size: 28px; cursor: pointer; }
+.feedback-star:hover, .feedback-star.selected { color: #e6a400; border-color: #e6a400; background: #fff9e7; }
+.feedback-comment-label { display: grid; gap: 6px; }
+.feedback-comment-label span { color: var(--muted); font-weight: 400; }
+.feedback-comment-label textarea { width: 100%; }
+.complaint-options { display: grid; gap: 8px; }
+.complaint-option { display: flex; align-items: center; gap: 10px; min-height: 40px; color: var(--text); cursor: pointer; }
+.complaint-option input { width: 18px; height: 18px; }
+.customer-feedback-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-top: 16px; padding: 12px 14px; border-radius: var(--radius-md); background: var(--surface-2); }
+.customer-feedback-summary p { flex-basis: 100%; margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
+.feedback-summary-stars { color: #e6a400; letter-spacing: 2px; }
+.customer-complaint-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-top: 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-2); }
+.customer-complaint-summary p { flex-basis: 100%; margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
 .booking-audit { border-top: 1px solid var(--border-light); margin-top: 18px; padding-top: 16px; }
 .booking-audit h3 { margin: 10px 0; }
 .booking-event-list { margin: 0; padding: 0 0 0 22px; }
@@ -2685,6 +2767,17 @@ ul.plain {
   padding: 8px 10px;
   border-radius: 6px;
 }
+.uc-demo-accounts {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: #f8fafc;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.uc-demo-accounts strong { color: var(--text); font-size: 12px; }
 .uc-login-trust-footer {
   display: flex;
   justify-content: center;
@@ -2716,11 +2809,26 @@ ul.plain {
 
 @media (max-width: 640px) {
   .service-category-panel { padding: 16px 12px; }
-  .service-category-grid { column-gap: 4px; row-gap: 12px; }
-  .service-category-tile { min-height: 126px; padding-inline: 0; font-size: 12px; }
+  .service-category-grid { row-gap: 6px; }
+  .service-category-tile { min-height: 0; padding: 4px; font-size: 14px; }
   .service-category-image { width: 72px; height: 72px; }
   .uc-service-card { grid-template-columns: minmax(0, 1fr) 112px; gap: 10px; padding: 13px; }
   .service-plan-image { width: 108px; height: 108px; }
   .service-plan-heading { min-height: 88px; padding: 17px 18px; }
   .service-plan-heading h1 { font-size: 24px; }
+}
+
+.period-filter.admin-booking-filters label,
+.period-filter.electrician-filters label { display: grid; gap: 4px; min-width: 145px; }
+.period-filter.admin-booking-filters input,
+.period-filter.admin-booking-filters select,
+.period-filter.electrician-filters input,
+.period-filter.electrician-filters select { min-width: 150px; }
+@media (max-width: 640px) {
+  .period-filter.admin-booking-filters label,
+  .period-filter.electrician-filters label { min-width: 100%; }
+  .period-filter.admin-booking-filters input,
+  .period-filter.admin-booking-filters select,
+  .period-filter.electrician-filters input,
+  .period-filter.electrician-filters select { width: 100%; }
 }

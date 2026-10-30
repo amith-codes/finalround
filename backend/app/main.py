@@ -24,6 +24,8 @@ async def lifespan(_app: FastAPI):
     init_db()
     with SessionLocal() as db:
         ensure_default_user(db)
+        from app.seed import ensure_demo_accounts
+        ensure_demo_accounts(db)
         n = mark_interrupted_runs(db)
         if n:
             log.warning("Marked %d scheduling run(s) left 'running' by a previous process as interrupted", n)
